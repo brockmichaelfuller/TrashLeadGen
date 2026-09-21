@@ -52,6 +52,8 @@
   .tools { display: grid; grid-template-columns: 1fr 130px auto auto auto; gap: 8px; margin-bottom: 12px; }
   @media (max-width: 560px) { .tools { grid-template-columns: 1fr 1fr; } }
   .scroll { overflow-x: auto; }
+  tr.new td { animation: flash 2s ease-out; }
+  @keyframes flash { from { background: rgba(31, 138, 91, .28); } to { background: transparent; } }
   table { width: 100%; border-collapse: collapse; }
   th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line); white-space: nowrap; }
   td:first-child { white-space: normal; min-width: 180px; }
@@ -123,7 +125,7 @@
 
 <script>
 const $ = id => document.getElementById(id);
-let leads = [], sort = { k: "company_name", dir: 1 }, wasRunning = false;
+let leads = [], sort = { k: null, dir: 1 }, wasRunning = false, seenSources = null;
 
 const api = (url, body) => fetch(url, body === undefined ? {} : {
   method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body)
@@ -133,9 +135,13 @@ function renderLeads() {
   const q = $("search").value.trim().toLowerCase(), st = $("stateFilter").value;
   const shown = leads.filter(l => (!st || l.state === st) &&
     (!q || [l.company_name, l.phone, l.email, l.address, l.city, l.state].some(v => (v || "").toLowerCase().includes(q))));
-  shown.sort((a, b) => (a[sort.k] || "").localeCompare(b[sort.k] || "") * sort.dir);
+  // Until a column header is clicked, show newest first so leads appear at the top as they are found.
+  if (sort.k) shown.sort((a, b) => (a[sort.k] || "").localeCompare(b[sort.k] || "") * sort.dir);
+  else shown.reverse();
+  const fresh = seenSources ? new Set(shown.filter(l => !seenSources.has(l.source + l.phone)).map(l => l.source + l.phone)) : new Set();
   $("rows").replaceChildren(...shown.map(l => {
     const tr = document.createElement("tr");
+    if (fresh.has(l.source + l.phone)) tr.className = "new";
     for (const k of ["company_name", "phone", "email", "website", "address", "city", "state", "timezone", "date_collected", "source"]) {
       const td = document.createElement("td");
       td.textContent = l[k] || "";
@@ -144,6 +150,7 @@ function renderLeads() {
     }
     return tr;
   }));
+  seenSources = new Set(leads.map(l => l.source + l.phone));
   $("statTotal").textContent = leads.length;
   $("statEmails").textContent = leads.filter(l => l.email).length;
   $("statStates").textContent = new Set(leads.map(l => l.state).filter(Boolean)).size;

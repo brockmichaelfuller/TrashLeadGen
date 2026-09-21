@@ -60,30 +60,37 @@ def run(cities_path, output_path):
         con.executemany("INSERT INTO wanted VALUES (?, ?)", cities)
 
     print("Scanning places (this reads a few GB and can take several minutes)...", flush=True)
-    rows = con.execute(build_query(release, bool(cities))).fetchall()
-    print(f"Scan done: {len(rows)} candidate places. Cleaning and deduping...", flush=True)
-
     output_path.parent.mkdir(parents=True, exist_ok=True)
     ensure_columns(output_path)
     seen = load_existing_phones(output_path)
     write_header = not output_path.exists() or output_path.stat().st_size == 0
     today = date.today().isoformat()
     new = 0
+    con.execute(build_query(release, bool(cities)))
     with output_path.open("a", newline="", encoding="utf-8") as out:
         writer = csv.DictWriter(out, fieldnames=COLUMNS)
         if write_header:
             writer.writeheader()
-        for name, raw_phone, city, state, place_id, email, website, address, lon, lat in rows:
-            phone = normalize_phone(raw_phone)
-            if not phone or phone in seen or EXCLUDE_NAME.search(name):
-                continue
-            seen.add(phone)
-            writer.writerow({"company_name": name.strip(), "phone": phone, "email": (email or "").strip().lower(),
-                             "website": website or "", "address": address or "", "city": city or "",
-                             "state": state or "", "timezone": timezone_label(state, lat, lon),
-                             "source": f"overture:{release}/{place_id}",
-                             "date_collected": today})
-            new += 1
+            out.flush()
+        # Stream results in small batches and flush every lead, so the UI shows them one by one.
+        while True:
+            batch = con.fetchmany(100)
+            if not batch:
+                break
+            for name, raw_phone, city, state, place_id, email, website, address, lon, lat in batch:
+                phone = normalize_phone(raw_phone)
+                if not phone or phone in seen or EXCLUDE_NAME.search(name):
+                    continue
+                seen.add(phone)
+                writer.writerow({"company_name": name.strip(), "phone": phone, "email": (email or "").strip().lower(),
+                                 "website": website or "", "address": address or "", "city": city or "",
+                                 "state": state or "", "timezone": timezone_label(state, lat, lon),
+                                 "source": f"overture:{release}/{place_id}",
+                                 "date_collected": today})
+                out.flush()
+                new += 1
+                if new % 25 == 0:
+                    print(f"...{new} leads so far", flush=True)
     print(f"Done. {new} new rows -> {output_path} ({len(seen)} total unique phones)", flush=True)
 
 
