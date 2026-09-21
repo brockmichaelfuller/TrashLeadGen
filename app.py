@@ -59,15 +59,17 @@ def start_run():
 
 
 def is_authorized(header):
-    """HTTP Basic auth against the APP_PASSWORD env var (any username). Open when unset (local only)."""
+    """HTTP Basic auth against APP_USERNAME (optional) and APP_PASSWORD. Open when no password is set (local only)."""
     password = os.environ.get("APP_PASSWORD")
     if not password:
         return True
     try:
-        supplied = base64.b64decode((header or "").split(" ", 1)[1]).decode().split(":", 1)[1]
+        user, supplied = base64.b64decode((header or "").split(" ", 1)[1]).decode().split(":", 1)
     except (IndexError, ValueError):
         return False
-    return hmac.compare_digest(supplied.encode(), password.encode())
+    username = os.environ.get("APP_USERNAME")
+    user_ok = hmac.compare_digest(user.encode(), username.encode()) if username else True
+    return hmac.compare_digest(supplied.encode(), password.encode()) and user_ok
 
 
 class Handler(BaseHTTPRequestHandler):
