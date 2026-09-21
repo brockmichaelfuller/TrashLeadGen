@@ -1,0 +1,198 @@
+"""Collect waste/garbage/dumpster company names and phone numbers from OpenStreetMap.
+
+Uses the free Overpass API (no key needed). One run covers the whole U.S.: the free
+Overpass server can't answer a single nationwide query (it times out), so the search is
+split into 50 states + DC internally. Businesses that publish a phone number are appended
+to a single CSV, deduped by phone number.
+"""
+import argparse
+import csv
+import re
+import sys
+import time
+from datetime import date, datetime
+from pathlib import Path
+from zoneinfo import ZoneInfo
+
+import requests
+
+OVERPASS_URLS = [
+    "https://overpass-api.de/api/interpreter",
+    "https://overpass.kumi.systems/api/interpreter",
+]
+USER_AGENT = "TrashLeadGen/0.1 (+https://github.com/brockmichaelfuller/TrashLeadGen)"
+REQUEST_DELAY_SECONDS = 5
+MAX_ATTEMPTS = 3
+QUERY_TIMEOUT_SECONDS = 300
+
+COLUMNS = ["company_name", "phone", "email", "website", "address", "city", "state", "timezone", "source", "date_collected"]
+
+NAME_REGEX = "waste"
+# The name must contain "waste" as a whole word (plurals allowed), so "Wasted Ink" or "Unwaste" don't match.
+KEYWORD_NAME = re.compile(rf"\b({NAME_REGEX})s?\b", re.I)
+# Keep only private garbage/waste pickup companies: drop utilities, medical/hazardous waste, marine and
+# portable sanitation, landfills/transfer stations, scrap and recycling yards, equipment sellers, and
+# public agencies. Used by both scrapers and by clean_existing().
+EXCLUDE_NAME = re.compile(
+    r"water|sewer|sewage|septic|medical|biohazard|hazardous|hazmat|marine|boat|\bsupply\b|supplies|equipment|"
+    r"pest|plumb|landfill|transfer station|recycling (center|facility|depot)|scrap|salvage|metal|mattress|"
+    r"e-?waste|electronic|shred|portable|porta[- ]?(potty|john)|toilet|restroom|cleaning|janitor|"
+    r"\b(city|town|village|county|township|state) of\b|\b(department|dept|authority|public works|municipal|"
+    r"school|hospital|clinic|dental|veterinary)\b|\bfacility\b|drop[- ]?off|collection center",
+    re.I,
+)
+EXCLUDE_MAN_MADE = {"wastewater_plant", "water_works", "water_tower", "storage_tank", "pumping_station"}
+STATES = [
+    "AL", "AK", "AZ", "AR", "CA", "CO", "CT", "DE", "DC", "FL", "GA", "HI", "ID", "IL", "IN", "IA", "KS",
+    "KY", "LA", "ME", "MD", "MA", "MI", "MN", "MS", "MO", "MT", "NE", "NV", "NH", "NJ", "NM", "NY", "NC",
+    "ND", "OH", "OK", "OR", "PA", "RI", "SC", "SD", "TN", "TX", "UT", "VT", "VA", "WA", "WV", "WI", "WY",
+]
+PHONE_KEYS = ("phone", "contact:phone")
+
+# Fallback when a lead has no coordinates: the state's main timezone (split states use where most people live).
+STATE_TIMEZONES = {
+    **dict.fromkeys("CT DE DC FL GA IN KY ME MD MA MI NH NJ NY NC OH PA RI SC VT VA WV".split(), "Eastern"),
+    **dict.fromkeys("AL AR IL IA KS LA MN MS MO NE ND OK SD TN TX WI".split(), "Central"),
+    **dict.fromkeys("AZ CO ID MT NM UT WY".split(), "Mountain"),
+    **dict.fromkeys("CA NV OR WA".split(), "Pacific"),
+    "AK": "Alaska", "HI": "Hawaii",
+}
+STANDARD_OFFSET_LABELS = {-5: "Eastern", -6: "Central", -7: "Mountain", -8: "Pacific", -9: "Alaska", -10: "Hawaii"}
+_finder = None
+
+
+def timezone_label(state, lat=None, lon=None):
+    """Timezone name like 'Central'. Uses coordinates when given (handles split states), else the state."""
+    global _finder
+    if lat is not None and lon is not None:
+        try:
+            if _finder is None:
+                from timezonefinder import TimezoneFinder
+                _finder = TimezoneFinder()
+            zone = _finder.timezone_at(lat=lat, lng=lon)
+            if zone:
+                offset = datetime(2026, 1, 15, tzinfo=ZoneInfo(zone)).utcoffset().total_seconds() / 3600
+                if offset in STANDARD_OFFSET_LABELS:  # standard-time offset, so Arizona counts as Mountain
+                    return STANDARD_OFFSET_LABELS[offset]
+        except Exception:
+            pass  # fall back to the state below
+    return STATE_TIMEZONES.get((state or "").upper(), "")
+
+
+def build_query(state_code):
+    # Filtering on the indexed "phone" key first keeps this fast; scanning names alone or
+    # adding "contact:phone" made Overpass time out. Phones are re-validated in Python.
+    return (
+        f"[out:json][timeout:{QUERY_TIMEOUT_SECONDS}];"
+        f'area["ISO3166-2"="US-{state_code}"]->.state;'
+        f'nwr(area.state)["phone"]["name"~"{NAME_REGEX}",i];out center tags;'
+    )
+
+
+def normalize_phone(raw):
+    """Return a US phone as '(555) 123-4567', or None if it isn't a valid 10-digit number."""
+    for candidate in re.split(r"[;,/]", raw or ""):
+        digits = re.sub(r"\D", "", candidate)
+        if len(digits) == 11 and digits.startswith("1"):
+            digits = digits[1:]
+        if len(digits) == 10 and digits[0] in "23456789":
+            return f"({digits[:3]}) {digits[3:6]}-{digits[6:]}"
+    return None
+
+
+def element_to_row(element, state, today):
+    tags = element.get("tags", {})
+    name = (tags.get("name") or "").strip()
+    if not name or not KEYWORD_NAME.search(name) or EXCLUDE_NAME.search(name) or tags.get("man_made") in EXCLUDE_MAN_MADE:
+        return None
+    phone = next((normalize_phone(tags[k]) for k in PHONE_KEYS if k in tags), None)
+    if not phone:
+        return None
+    point = element if "lat" in element else element.get("center", {})
+    return {
+        "company_name": name,
+        "phone": phone,
+        "email": (tags.get("email") or tags.get("contact:email") or "").strip(),
+        "website": (tags.get("website") or tags.get("contact:website") or "").strip(),
+        "address": " ".join(filter(None, [tags.get("addr:housenumber"), tags.get("addr:street")])),
+        "city": (tags.get("addr:city") or "").strip(),
+        "state": state,
+        "timezone": timezone_label(state, point.get("lat"), point.get("lon")),
+        "source": f"openstreetmap:{element['type']}/{element['id']}",
+        "date_collected": today,
+    }
+
+
+def fetch_elements(state_code):
+    query = build_query(state_code)
+    headers = {"User-Agent": USER_AGENT, "Accept": "application/json"}
+    last_error = None
+    for attempt in range(MAX_ATTEMPTS):
+        url = OVERPASS_URLS[attempt % len(OVERPASS_URLS)]
+        try:
+            response = requests.post(url, data={"data": query}, headers=headers, timeout=QUERY_TIMEOUT_SECONDS + 30)
+            response.raise_for_status()
+            data = response.json()
+            if "runtime error" in data.get("remark", ""):  # Overpass reports timeouts with HTTP 200
+                raise RuntimeError(data["remark"])
+            return data.get("elements", [])
+        except (requests.RequestException, ValueError, RuntimeError) as error:
+            last_error = error
+            time.sleep(REQUEST_DELAY_SECONDS * (attempt + 1))
+    raise RuntimeError(f"Overpass failed after {MAX_ATTEMPTS} attempts: {last_error}")
+
+
+def load_existing_phones(path):
+    if not path.exists():
+        return set()
+    with path.open(newline="", encoding="utf-8") as f:
+        return {row["phone"] for row in csv.DictReader(f)}
+
+
+def run(output_path, states):
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    seen = load_existing_phones(output_path)
+    write_header = not output_path.exists() or output_path.stat().st_size == 0
+    today = date.today().isoformat()
+    failed = []
+    total_new = 0
+
+    with output_path.open("a", newline="", encoding="utf-8") as out:
+        writer = csv.DictWriter(out, fieldnames=COLUMNS)
+        if write_header:
+            writer.writeheader()
+        for i, state in enumerate(states):
+            try:
+                elements = fetch_elements(state)
+            except Exception as error:  # one bad state must not stop the run
+                print(f"[{i + 1}/{len(states)}] {state}: FAILED ({error})", file=sys.stderr)
+                failed.append(state)
+                continue
+            new = 0
+            for element in elements:
+                row = element_to_row(element, state, today)
+                if row and row["phone"] not in seen:
+                    seen.add(row["phone"])
+                    writer.writerow(row)
+                    new += 1
+            out.flush()  # keep progress if the run is interrupted later
+            total_new += new
+            print(f"[{i + 1}/{len(states)}] {state}: {new} new companies")
+            time.sleep(REQUEST_DELAY_SECONDS)
+
+    print(f"Done. {total_new} new rows -> {output_path} ({len(seen)} total unique phones)")
+    if failed:
+        print(f"Failed states (rerun to retry): {', '.join(failed)}", file=sys.stderr)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--output", type=Path, default=Path("output/leads.csv"))
+    parser.add_argument("--states", nargs="+", default=STATES, metavar="ST",
+                        help="limit the run to these state codes, e.g. --states CO WA")
+    args = parser.parse_args()
+    run(args.output, [state.upper() for state in args.states])
+
+
+if __name__ == "__main__":
+    main()

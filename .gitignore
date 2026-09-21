@@ -1,0 +1,10 @@
+# secrets
+.env
+
+# python
+venv/
+__pycache__/
+*.pyc
+
+# generated lead data (research list, not for the repo)
+output/
