@@ -10,5 +10,7 @@ services:
         value: 0.0.0.0
       - key: PYTHON_VERSION
         value: 3.11.9
+      - key: APP_USERNAME
+        sync: false # comma-separated, set in the Render dashboard
       - key: APP_PASSWORD
         sync: false # set this in the Render dashboard, never in git

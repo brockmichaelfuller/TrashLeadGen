@@ -59,7 +59,7 @@ def start_run():
 
 
 def is_authorized(header):
-    """HTTP Basic auth against APP_USERNAME (optional) and APP_PASSWORD. Open when no password is set (local only)."""
+    """HTTP Basic auth against APP_USERNAME (optional comma-separated list) and APP_PASSWORD. Open when no password is set (local only)."""
     password = os.environ.get("APP_PASSWORD")
     if not password:
         return True
@@ -67,8 +67,8 @@ def is_authorized(header):
         user, supplied = base64.b64decode((header or "").split(" ", 1)[1]).decode().split(":", 1)
     except (IndexError, ValueError):
         return False
-    username = os.environ.get("APP_USERNAME")
-    user_ok = hmac.compare_digest(user.encode(), username.encode()) if username else True
+    allowed = [u.strip().lower() for u in os.environ.get("APP_USERNAME", "").split(",") if u.strip()]
+    user_ok = user.lower() in allowed if allowed else True  # comma-separated list, case-insensitive
     return hmac.compare_digest(supplied.encode(), password.encode()) and user_ok
 
 
