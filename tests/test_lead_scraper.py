@@ -1,6 +1,9 @@
+import csv
+import tempfile
 import unittest
+from pathlib import Path
 
-from lead_scraper import STATES, element_to_row, normalize_phone
+from lead_scraper import STATES, element_to_row, load_existing_phones, normalize_phone
 
 
 class NormalizePhoneTests(unittest.TestCase):
@@ -59,6 +62,21 @@ class MoreTests(unittest.TestCase):
         for name in ("ABC Waste Services", "Metro Roll-Off Waste Hauling", "Tri-County Waste Disposal"):
             tags = {"name": name, "phone": "303-343-7096"}
             self.assertIsNotNone(element_to_row({"type": "node", "id": 1, "tags": tags}, "CO", "x"), name)
+
+
+class ExistingPhonesTests(unittest.TestCase):
+    def test_existing_rows_match_regardless_of_phone_format(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "leads.csv"
+            with path.open("w", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=["company_name", "phone"])
+                writer.writeheader()
+                writer.writerow({"company_name": "A", "phone": "303-343-7096"})
+                writer.writerow({"company_name": "B", "phone": "(480) 400-3393"})
+            phones = load_existing_phones(path)
+            self.assertIn("(303) 343-7096", phones)
+            self.assertIn("(480) 400-3393", phones)
+            self.assertEqual(load_existing_phones(Path(tmp) / "missing.csv"), set())
 
 
 if __name__ == "__main__":

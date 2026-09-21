@@ -1,0 +1,14 @@
+services:
+  - type: web
+    name: trashleadgen
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python app.py
+    envVars:
+      - key: HOST
+        value: 0.0.0.0
+      - key: PYTHON_VERSION
+        value: 3.11.9
+      - key: APP_PASSWORD
+        sync: false # set this in the Render dashboard, never in git

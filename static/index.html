@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TrashLeadGen</title>
+<style>
+  :root {
+    --bg: #f6f7f5; --panel: #fff; --text: #1c2320; --muted: #66716b; --line: #dfe4e0;
+    --accent: #1f7a4d; --accent-text: #fff; --danger: #b3261e; --row: #f0f3f0;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #121614; --panel: #1a201d; --text: #e6ebe8; --muted: #8b968f; --line: #2b332f;
+            --accent: #3fb77a; --accent-text: #0b1410; --danger: #f2877f; --row: #222a26; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+  header { padding: 20px 24px 0; max-width: 1200px; margin: 0 auto; }
+  h1 { margin: 0; font-size: 20px; }
+  .sub { color: var(--muted); margin-top: 2px; }
+  main { max-width: 1200px; margin: 0 auto; padding: 16px 24px 40px; display: grid; gap: 16px;
+         grid-template-columns: 340px minmax(0, 1fr); align-items: start; }
+  @media (max-width: 860px) { main { grid-template-columns: minmax(0, 1fr); padding: 16px; } header { padding: 16px 16px 0; } }
+  .card { min-width: 0; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px; }
+  .card h2 { margin: 0 0 12px; font-size: 13px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); }
+  .stack { display: grid; grid-template-columns: minmax(0, 1fr); gap: 16px; min-width: 0; }
+  button, input, select { font: inherit; color: inherit; }
+  button { border: 1px solid var(--line); background: var(--panel); border-radius: 7px; padding: 7px 12px; cursor: pointer; }
+  button:hover { background: var(--row); }
+  button.primary { background: var(--accent); color: var(--accent-text); border-color: var(--accent); font-weight: 600; }
+  button.primary:hover { filter: brightness(1.08); }
+  button.danger { color: var(--danger); }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  input, select { border: 1px solid var(--line); background: var(--bg); border-radius: 7px; padding: 7px 10px; width: 100%; }
+  .row { display: flex; gap: 8px; align-items: center; }
+  .row > * { flex: 1; }
+  .row > button { flex: none; }
+  .between { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+  .link { background: none; border: none; color: var(--accent); padding: 0; }
+  .link:hover { background: none; text-decoration: underline; }
+  details summary { cursor: pointer; color: var(--muted); margin-top: 12px; }
+  .grid4 { display: grid; grid-template-columns: 1fr 70px; gap: 8px; margin-top: 8px; }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin: 8px 0; }
+  .bar { height: 8px; background: var(--row); border-radius: 4px; overflow: hidden; margin: 10px 0 8px; }
+  .bar div { height: 100%; width: 0; background: var(--accent); transition: width .3s; }
+  pre { margin: 0; max-height: 150px; overflow: auto; background: var(--bg); border: 1px solid var(--line);
+        border-radius: 7px; padding: 8px 10px; font: 12px/1.5 ui-monospace, Menlo, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .stats { display: flex; gap: 24px; margin-bottom: 12px; }
+  .stat b { display: block; font-size: 22px; }
+  .stat span { color: var(--muted); font-size: 12px; }
+  .tools { display: grid; grid-template-columns: 1fr 130px auto auto auto; gap: 8px; margin-bottom: 12px; }
+  @media (max-width: 560px) { .tools { grid-template-columns: 1fr 1fr; } }
+  .scroll { overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+  td:first-child { white-space: normal; min-width: 180px; }
+  td:nth-child(4) { max-width: 180px; overflow: hidden; text-overflow: ellipsis; }
+  th { color: var(--muted); font-weight: 600; font-size: 12px; cursor: pointer; user-select: none; }
+  th:hover { color: var(--text); }
+  tbody tr:hover { background: var(--row); }
+  .src { color: var(--muted); font-size: 12px; }
+  .empty { text-align: center; color: var(--muted); padding: 40px 0; }
+  .note { color: var(--muted); font-size: 12px; margin-top: 12px; }
+  .err { color: var(--danger); margin-top: 8px; min-height: 1em; }
+</style>
+</head>
+<body>
+<header>
+  <h1>TrashLeadGen</h1>
+  <div class="sub">Waste &amp; dumpster company leads from Overture Maps open data. Free, no API key.</div>
+</header>
+
+<main>
+  <div class="stack">
+    <section class="card">
+      <h2>Scrape</h2>
+      <div class="sub">Searches the entire United States in one pass.</div>
+      <div class="row" style="margin-top:12px">
+        <button class="primary" id="run">Run scrape</button>
+        <button class="danger" id="stop" hidden>Stop</button>
+      </div>
+            <div class="err" id="err"></div>
+    </section>
+
+    <section class="card" id="progressCard" hidden>
+      <h2>Progress</h2>
+      <div id="progressText" class="sub"></div>
+      <div class="bar"><div id="barFill"></div></div>
+      <pre id="log"></pre>
+      <div class="note">One scrape reads Overture Maps places in a single pass; expect several minutes.</div>
+    </section>
+  </div>
+
+  <section class="card">
+    <h2>Leads</h2>
+    <div class="stats">
+      <div class="stat"><b id="statTotal">0</b><span>unique phones</span></div>
+      <div class="stat"><b id="statEmails">0</b><span>with email</span></div>
+      <div class="stat"><b id="statStates">0</b><span>states</span></div>
+      <div class="stat"><b id="statShown">0</b><span>shown</span></div>
+    </div>
+    <div class="tools">
+      <input id="search" type="search" placeholder="Search name, phone, email, city…">
+      <select id="stateFilter"><option value="">All states</option></select>
+      <button id="copy">Copy phones</button>
+      <button id="copyEmails">Copy emails</button>
+      <a href="/api/export.csv" download><button type="button">Download CSV</button></a>
+    </div>
+    <div class="scroll">
+      <table>
+        <thead><tr>
+          <th data-k="company_name">Company</th><th data-k="phone">Phone</th><th data-k="email">Email</th><th data-k="website">Website</th><th data-k="address">Address</th><th data-k="city">City</th>
+          <th data-k="state">State</th><th data-k="timezone">Timezone</th><th data-k="date_collected">Collected</th><th data-k="source">Source</th>
+        </tr></thead>
+        <tbody id="rows"></tbody>
+      </table>
+    </div>
+    <div class="empty" id="empty" hidden>No leads yet. Click Run scrape to collect them.</div>
+    <div class="note">Research list only. Do not call or text anyone until Thomas has reviewed it (TCPA / do-not-call rules apply).</div>
+  </section>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+let leads = [], sort = { k: "company_name", dir: 1 }, wasRunning = false;
+
+const api = (url, body) => fetch(url, body === undefined ? {} : {
+  method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body)
+}).then(async r => { const j = await r.json(); if (!r.ok) throw new Error(j.error || "Request failed"); return j; });
+
+function renderLeads() {
+  const q = $("search").value.trim().toLowerCase(), st = $("stateFilter").value;
+  const shown = leads.filter(l => (!st || l.state === st) &&
+    (!q || [l.company_name, l.phone, l.email, l.address, l.city, l.state].some(v => (v || "").toLowerCase().includes(q))));
+  shown.sort((a, b) => (a[sort.k] || "").localeCompare(b[sort.k] || "") * sort.dir);
+  $("rows").replaceChildren(...shown.map(l => {
+    const tr = document.createElement("tr");
+    for (const k of ["company_name", "phone", "email", "website", "address", "city", "state", "timezone", "date_collected", "source"]) {
+      const td = document.createElement("td");
+      td.textContent = l[k] || "";
+      if (k === "source") td.className = "src";
+      tr.append(td);
+    }
+    return tr;
+  }));
+  $("statTotal").textContent = leads.length;
+  $("statEmails").textContent = leads.filter(l => l.email).length;
+  $("statStates").textContent = new Set(leads.map(l => l.state).filter(Boolean)).size;
+  $("statShown").textContent = shown.length;
+  $("empty").hidden = leads.length > 0;
+  const states = [...new Set(leads.map(l => l.state).filter(Boolean))].sort();
+  const cur = $("stateFilter").value;
+  $("stateFilter").replaceChildren(new Option("All states", ""), ...states.map(s => new Option(s, s)));
+  $("stateFilter").value = states.includes(cur) ? cur : "";
+  return shown;
+}
+
+async function loadLeads() { leads = await api("/api/leads"); renderLeads(); }
+
+async function poll() {
+  const s = await api("/api/status");
+  $("progressCard").hidden = !s.started;
+  $("run").disabled = s.running;
+  $("stop").hidden = !s.running;
+  if (s.started) {
+    const scope = "the entire U.S.";
+    $("progressText").textContent = s.running ? `Scraping ${scope}…` : s.failed ? "Scrape failed — see log" : `Finished scraping ${scope}`;
+    $("barFill").style.width = s.running ? "100%" : s.failed ? "0%" : "100%";
+    $("barFill").style.opacity = s.running ? .5 : 1;
+    const log = $("log"), atEnd = log.scrollTop + log.clientHeight >= log.scrollHeight - 20;
+    log.textContent = s.log.join("\n");
+    if (atEnd) log.scrollTop = log.scrollHeight;
+  }
+  if (s.running || wasRunning) await loadLeads();
+  wasRunning = s.running;
+}
+
+$("search").oninput = $("stateFilter").onchange = renderLeads;
+document.querySelectorAll("th[data-k]").forEach(th => th.onclick = () => {
+  sort = { k: th.dataset.k, dir: sort.k === th.dataset.k ? -sort.dir : 1 };
+  renderLeads();
+});
+
+$("run").onclick = async () => {
+  $("err").textContent = "";
+  try { await api("/api/run", {}); await poll(); } catch (e) { $("err").textContent = e.message; }
+};
+$("stop").onclick = () => api("/api/stop", {}).then(poll);
+
+$("copyEmails").onclick = async () => {
+  await navigator.clipboard.writeText(renderLeads().map(l => l.email).filter(Boolean).join("\n"));
+  $("copyEmails").textContent = "Copied!";
+  setTimeout(() => $("copyEmails").textContent = "Copy emails", 1200);
+};
+
+$("copy").onclick = async () => {
+  const phones = renderLeads().map(l => l.phone).join("\n");
+  await navigator.clipboard.writeText(phones);
+  $("copy").textContent = "Copied!";
+  setTimeout(() => $("copy").textContent = "Copy phones", 1200);
+};
+
+loadLeads(); poll();
+setInterval(() => poll().catch(() => {}), 2000);
+</script>
+</body>
+</html>

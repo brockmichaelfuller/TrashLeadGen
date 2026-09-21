@@ -143,14 +143,31 @@ def fetch_elements(state_code):
 
 
 def load_existing_phones(path):
+    """Phones already saved in the CSV, normalized so old rows in other formats still match."""
     if not path.exists():
         return set()
     with path.open(newline="", encoding="utf-8") as f:
-        return {row["phone"] for row in csv.DictReader(f)}
+        return {normalize_phone(row.get("phone")) or row.get("phone") for row in csv.DictReader(f)}
+
+
+def ensure_columns(path):
+    """Upgrade an older CSV in place so its header matches COLUMNS (missing fields left blank)."""
+    if not path.exists() or path.stat().st_size == 0:
+        return
+    with path.open(newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        if reader.fieldnames == COLUMNS:
+            return
+        rows = list(reader)
+    with path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=COLUMNS, extrasaction="ignore", restval="")
+        writer.writeheader()
+        writer.writerows(rows)
 
 
 def run(output_path, states):
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    ensure_columns(output_path)
     seen = load_existing_phones(output_path)
     write_header = not output_path.exists() or output_path.stat().st_size == 0
     today = date.today().isoformat()
@@ -162,6 +179,7 @@ def run(output_path, states):
         if write_header:
             writer.writeheader()
         for i, state in enumerate(states):
+            seen |= load_existing_phones(output_path)  # pick up rows another scraper added meanwhile
             try:
                 elements = fetch_elements(state)
             except Exception as error:  # one bad state must not stop the run
