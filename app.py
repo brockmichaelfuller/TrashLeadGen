@@ -1,9 +1,9 @@
-"""Local web front end for overture_scraper.py.
+"""Web front end for the lead scrapers (overture_scraper.py or lead_scraper.py).
 
     python app.py            # then open http://127.0.0.1:8000
 
 Standard library only. Serves static/index.html and a small JSON API; scrapes by
-running overture_scraper.py as a subprocess so the CLI and the UI share one code path.
+running the scraper as a subprocess so the CLI and the UI share one code path.
 """
 import argparse
 import base64
@@ -21,6 +21,9 @@ ROOT = Path(__file__).parent
 LEADS_PATH = ROOT / "output" / "leads.csv"
 INDEX_PATH = ROOT / "static" / "index.html"
 MAX_LOG_LINES = 500
+# SCRAPER=osm uses the low-memory OpenStreetMap scraper (for small hosts like Render's free plan);
+# the default Overture scraper scans several GB and needs a few GB of RAM.
+SCRAPER_SCRIPT = "lead_scraper.py" if os.environ.get("SCRAPER", "overture").lower() == "osm" else "overture_scraper.py"
 
 lock = threading.Lock()
 job = {"proc": None, "log": [], "started": False}
@@ -51,7 +54,7 @@ def start_run():
     with lock:
         if is_running():
             return "A run is already in progress."
-        cmd = [sys.executable, "-u", str(ROOT / "overture_scraper.py"), "--output", str(LEADS_PATH)]
+        cmd = [sys.executable, "-u", str(ROOT / SCRAPER_SCRIPT), "--output", str(LEADS_PATH)]
         proc = subprocess.Popen(cmd, cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
         job.update(proc=proc, log=[], started=True)
     threading.Thread(target=pump_output, args=(proc,), daemon=True).start()

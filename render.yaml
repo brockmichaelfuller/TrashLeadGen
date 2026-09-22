@@ -8,6 +8,8 @@ services:
     envVars:
       - key: HOST
         value: 0.0.0.0
+      - key: SCRAPER
+        value: osm # low-memory scraper for the free plan
       - key: PYTHON_VERSION
         value: 3.11.9
       - key: APP_USERNAME
