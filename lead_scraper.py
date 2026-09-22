@@ -33,12 +33,17 @@ KEYWORD_NAME = re.compile(rf"\b({NAME_REGEX})s?\b", re.I)
 # Keep only private garbage/waste pickup companies: drop utilities, medical/hazardous waste, marine and
 # portable sanitation, landfills/transfer stations, scrap and recycling yards, equipment sellers, and
 # public agencies. Used by both scrapers and by clean_existing().
+# "Residential curb pickup" means an actual garbage-truck hauling company, not: dumpster rental /
+# roll-off / junk hauling, construction & demolition debris, corporate offices / sustainability
+# campuses, or retail stores selling zero-waste products.
 EXCLUDE_NAME = re.compile(
     r"water|sewer|sewage|septic|medical|biohazard|hazardous|hazmat|marine|boat|\bsupply\b|supplies|equipment|"
     r"pest|plumb|landfill|transfer station|recycling (center|facility|depot)|scrap|salvage|metal|mattress|"
     r"e-?waste|electronic|shred|portable|porta[- ]?(potty|john)|toilet|restroom|cleaning|janitor|"
     r"\b(city|town|village|county|township|state) of\b|\b(department|dept|authority|public works|municipal|"
-    r"school|hospital|clinic|dental|veterinary)\b|\bfacility\b|drop[- ]?off|collection center",
+    r"school|hospital|clinic|dental|veterinary)\b|\bfacility\b|drop[- ]?off|collection center|"
+    r"dumpster|roll[- ]?off|\bjunk\b|construction|demolition|debris|industrial|"
+    r"campus|sustainability|headquarters|corporate office|\bstore\b|\bshop\b|\bmarket\b",
     re.I,
 )
 EXCLUDE_MAN_MADE = {"wastewater_plant", "water_works", "water_tower", "storage_tank", "pumping_station"}
@@ -47,6 +52,9 @@ STATES = [
     "KY", "LA", "ME", "MD", "MA", "MI", "MN", "MS", "MO", "MT", "NE", "NV", "NH", "NJ", "NM", "NY", "NC",
     "ND", "OH", "OK", "OR", "PA", "RI", "SC", "SD", "TN", "TX", "UT", "VT", "VA", "WA", "WV", "WI", "WY",
 ]
+# Split into 4 chunks of ~13 states so a run finishes well within Render's free-plan idle window,
+# instead of one long run that dies if the tab loses focus partway through the country.
+STATE_GROUPS = [STATES[i:i + 13] for i in range(0, len(STATES), 13)]
 PHONE_KEYS = ("phone", "contact:phone")
 REQUIRED_FIELDS = ("company_name", "phone", "email", "timezone")  # a lead with all four is "complete"
 EMAIL_RE = re.compile(r"^[^@\s;,]+@[^@\s;,]+\.[A-Za-z]{2,}$")

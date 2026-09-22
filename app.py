@@ -21,16 +21,21 @@ from urllib.parse import parse_qs
 
 ROOT = Path(__file__).parent
 sys.path.insert(0, str(ROOT))
-from lead_scraper import COLUMNS, missing_fields  # noqa: E402
+from lead_scraper import COLUMNS, STATE_GROUPS, missing_fields  # noqa: E402
 LEADS_PATH = ROOT / "output" / "leads.csv"
 INDEX_PATH = ROOT / "static" / "index.html"
 MAX_LOG_LINES = 500
 # SCRAPER=osm uses the low-memory OpenStreetMap scraper (for small hosts like Render's free plan);
 # the default Overture scraper scans several GB and needs a few GB of RAM.
-SCRAPER_SCRIPT = "lead_scraper.py" if os.environ.get("SCRAPER", "overture").lower() == "osm" else "overture_scraper.py"
+USING_OSM = os.environ.get("SCRAPER", "overture").lower() == "osm"
+SCRAPER_SCRIPT = "lead_scraper.py" if USING_OSM else "overture_scraper.py"
+# Only the OSM scraper is split into state groups (it's the one that runs one slow request per
+# state and can outlast Render's free-plan idle window on a full nationwide run).
+GROUPS = [{"id": str(i + 1), "label": f"{g[0]}–{g[-1]} ({len(g)} states)", "states": g}
+          for i, g in enumerate(STATE_GROUPS)] if USING_OSM else []
 
 lock = threading.Lock()
-job = {"proc": None, "log": [], "started": False}
+job = {"proc": None, "log": [], "started": False, "scope": ""}
 
 
 def read_csv(path):
@@ -69,14 +74,19 @@ def pump_output(proc):
     proc.wait()
 
 
-def start_run():
-    """One scrape of the entire U.S."""
+def start_run(group_id):
+    """One scrape, either the whole U.S. or (OSM only) one ~13-state group."""
+    group = next((g for g in GROUPS if g["id"] == group_id), None)
+    if group_id and group_id != "all" and not group:
+        return "Unknown group."
     with lock:
         if is_running():
             return "A run is already in progress."
         cmd = [sys.executable, "-u", str(ROOT / SCRAPER_SCRIPT), "--output", str(LEADS_PATH)]
+        if group:
+            cmd += ["--states", *group["states"]]
         proc = subprocess.Popen(cmd, cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-        job.update(proc=proc, log=[], started=True)
+        job.update(proc=proc, log=[], started=True, scope=group["label"] if group else "the entire U.S.")
     threading.Thread(target=pump_output, args=(proc,), daemon=True).start()
     return None
 
@@ -135,7 +145,10 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/api/status":
             with lock:
                 self.send_json({"running": is_running(), "started": job["started"], "log": job["log"],
+                            "scope": job["scope"],
                             "failed": job["proc"] is not None and (job["proc"].poll() or 0) != 0})
+        elif path == "/api/groups":
+            self.send_json({"groups": GROUPS})
         elif path == "/api/export.csv":
             which = {"complete": "complete", "partial": "partial"}.get(parse_qs(query).get("set", [""])[0], "all")
             self.send_body(export_csv(LEADS_PATH, which), "text/csv",
@@ -149,7 +162,7 @@ class Handler(BaseHTTPRequestHandler):
         path = self.path.split("?")[0]
         data = self.read_json()
         if path == "/api/run":
-            error = start_run()
+            error = start_run(data.get("group", "all"))
             return self.send_json({"error": error}, 400) if error else self.send_json({"ok": True})
         if path == "/api/stop":
             with lock:

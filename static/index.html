@@ -80,7 +80,10 @@
   <div class="stack">
     <section class="card">
       <h2>Scrape</h2>
-      <div class="sub">Searches the entire United States in one run.</div>
+      <div class="sub">Searches the United States for residential trash-pickup companies.</div>
+      <select id="scope" hidden style="margin-top:10px">
+        <option value="all">Entire U.S. (slow — can outlast a free-plan session)</option>
+      </select>
       <div class="row" style="margin-top:12px">
         <button class="primary" id="run">Run scrape</button>
         <button class="danger" id="stop" hidden>Stop</button>
@@ -93,7 +96,7 @@
       <div id="progressText" class="sub"></div>
       <div class="bar"><div id="barFill"></div></div>
       <pre id="log"></pre>
-      <div class="note">One run covers the whole U.S. and can take a while. Leads appear as they are found, so keep this page open.</div>
+      <div class="note">Leads appear as they are found, so keep this page open while a run is in progress.</div>
     </section>
   </div>
 
@@ -180,13 +183,20 @@ function renderLeads() {
 
 async function loadLeads() { leads = await api("/api/leads"); renderLeads(); }
 
+async function loadGroups() {
+  const { groups } = await api("/api/groups");
+  if (!groups.length) return; // Overture scraper: one query covers the whole country, no groups
+  $("scope").hidden = false;
+  for (const g of groups) $("scope").append(new Option(`Group ${g.id}: ${g.label}`, g.id));
+}
+
 async function poll() {
   const s = await api("/api/status");
   $("progressCard").hidden = !s.started;
   $("run").disabled = s.running;
   $("stop").hidden = !s.running;
   if (s.started) {
-    const scope = "the entire U.S.";
+    const scope = s.scope || "the entire U.S.";
     $("progressText").textContent = s.running ? `Scraping ${scope}…` : s.failed ? "Scrape failed — see log" : `Finished scraping ${scope}`;
     $("barFill").style.width = s.running ? "100%" : s.failed ? "0%" : "100%";
     $("barFill").style.opacity = s.running ? .5 : 1;
@@ -196,6 +206,24 @@ async function poll() {
   }
   if (s.running || wasRunning) await loadLeads();
   wasRunning = s.running;
+}
+
+// Clipboard API needs a secure context and can be silently blocked by browser settings; fall back
+// to the older execCommand, and as a last resort show the text so it can be copied by hand.
+async function copyText(text) {
+  try { await navigator.clipboard.writeText(text); return true; } catch (e) {}
+  try {
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.style.position = "fixed"; ta.style.top = "-1000px"; ta.readOnly = true;
+    document.body.append(ta);
+    ta.focus(); ta.select();
+    const ok = document.execCommand("copy");
+    ta.remove();
+    if (ok) return true;
+  } catch (e) {}
+  window.prompt("Couldn't copy automatically — copy this manually:", text);
+  return false;
 }
 
 $("search").oninput = $("stateFilter").onchange = renderLeads;
@@ -208,24 +236,25 @@ document.querySelectorAll("th[data-k]").forEach(th => th.onclick = () => {
 
 $("run").onclick = async () => {
   $("err").textContent = "";
-  try { await api("/api/run", {}); await poll(); } catch (e) { $("err").textContent = e.message; }
+  try { await api("/api/run", { group: $("scope").hidden ? "all" : $("scope").value }); await poll(); }
+  catch (e) { $("err").textContent = e.message; }
 };
 $("stop").onclick = () => api("/api/stop", {}).then(poll);
 
 $("copyEmails").onclick = async () => {
-  await navigator.clipboard.writeText(renderLeads().map(l => l.email).filter(Boolean).join("\n"));
-  $("copyEmails").textContent = "Copied!";
+  const ok = await copyText(renderLeads().map(l => l.email).filter(Boolean).join("\n"));
+  $("copyEmails").textContent = ok ? "Copied!" : "See prompt";
   setTimeout(() => $("copyEmails").textContent = "Copy emails", 1200);
 };
 
 $("copy").onclick = async () => {
   const phones = renderLeads().map(l => l.phone).join("\n");
-  await navigator.clipboard.writeText(phones);
-  $("copy").textContent = "Copied!";
+  const ok = await copyText(phones);
+  $("copy").textContent = ok ? "Copied!" : "See prompt";
   setTimeout(() => $("copy").textContent = "Copy phones", 1200);
 };
 
-loadLeads(); poll();
+loadLeads(); loadGroups(); poll();
 setInterval(() => poll().catch(() => {}), 2000);
 </script>
 </body>

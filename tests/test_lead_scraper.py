@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from lead_scraper import STATES, clean_email, element_to_row, is_complete, missing_fields, load_existing_phones, normalize_phone
+from lead_scraper import STATE_GROUPS, STATES, clean_email, element_to_row, is_complete, missing_fields, load_existing_phones, normalize_phone
 
 
 class NormalizePhoneTests(unittest.TestCase):
@@ -42,6 +42,13 @@ class MoreTests(unittest.TestCase):
         self.assertEqual(len(STATES), 51)
         self.assertEqual(len(set(STATES)), 51)
 
+    def test_state_groups_cover_every_state_once(self):
+        self.assertEqual(len(STATE_GROUPS), 4)
+        flattened = [s for g in STATE_GROUPS for s in g]
+        self.assertEqual(flattened, STATES)
+        for g in STATE_GROUPS:
+            self.assertIn(len(g), (12, 13))
+
     def test_keyword_must_be_a_whole_word(self):
         for name in ("Wasted Ink Zine Distro", "The Unwaste Shop"):
             tags = {"name": name, "phone": "303-343-7096"}
@@ -59,8 +66,19 @@ class MoreTests(unittest.TestCase):
                      "City of Dallas Sanitation Department", "Acme Portable Toilet Waste"):
             tags = {"name": name, "phone": "303-343-7096"}
             self.assertIsNone(element_to_row({"type": "node", "id": 1, "tags": tags}, "CO", "x"), name)
-        for name in ("ABC Waste Services", "Metro Roll-Off Waste Hauling", "Tri-County Waste Disposal"):
+        for name in ("ABC Waste Services", "Tri-County Waste Disposal"):
             tags = {"name": name, "phone": "303-343-7096", "email": "a@b.com"}
+            self.assertIsNotNone(element_to_row({"type": "node", "id": 1, "tags": tags}, "CO", "x"), name)
+
+    def test_only_residential_curb_pickup_is_kept(self):
+        for name in ("Metro Roll-Off Waste Hauling", "ABC Waste Dumpster Rental",
+                     "Waste Connections Sustainability Campus", "Zero Waste Market", "My Zero Waste Store",
+                     "Acme Waste Junk Removal", "Waste Management Corporate Headquarters",
+                     "XYZ Construction & Waste Debris Removal"):
+            tags = {"name": name, "phone": "303-343-7096"}
+            self.assertIsNone(element_to_row({"type": "node", "id": 1, "tags": tags}, "CO", "x"), name)
+        for name in ("Waste Connections", "ABC Waste Services", "Republic Waste Pickup"):
+            tags = {"name": name, "phone": "303-343-7096"}
             self.assertIsNotNone(element_to_row({"type": "node", "id": 1, "tags": tags}, "CO", "x"), name)
 
 
