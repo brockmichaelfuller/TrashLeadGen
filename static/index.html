@@ -52,6 +52,9 @@
   .tools { display: grid; grid-template-columns: 1fr 130px auto auto auto; gap: 8px; margin-bottom: 12px; }
   @media (max-width: 560px) { .tools { grid-template-columns: 1fr 1fr; } }
   .scroll { overflow-x: auto; }
+  .tabs { display: flex; gap: 8px; margin-bottom: 14px; }
+  .tab { padding: 7px 14px; }
+  .tab.active { background: var(--text); color: var(--panel); border-color: var(--text); }
   tr.new td { animation: flash 2s ease-out; }
   @keyframes flash { from { background: rgba(31, 138, 91, .28); } to { background: transparent; } }
   table { width: 100%; border-collapse: collapse; }
@@ -96,6 +99,10 @@
 
   <section class="card">
     <h2>Leads</h2>
+    <div class="tabs">
+      <button class="tab active" id="tabComplete">Complete (name, phone, email, timezone) <b id="cntComplete">0</b></button>
+      <button class="tab" id="tabPartial">Partial (missing something) <b id="cntPartial">0</b></button>
+    </div>
     <div class="stats">
       <div class="stat"><b id="statTotal">0</b><span>unique phones</span></div>
       <div class="stat"><b id="statEmails">0</b><span>with email</span></div>
@@ -107,13 +114,13 @@
       <select id="stateFilter"><option value="">All states</option></select>
       <button id="copy">Copy phones</button>
       <button id="copyEmails">Copy emails</button>
-      <a href="/api/export.csv" download><button type="button">Download CSV</button></a>
+      <a id="download" href="/api/export.csv?set=complete" download><button type="button">Download CSV</button></a>
     </div>
     <div class="scroll">
       <table>
         <thead><tr>
           <th data-k="company_name">Company</th><th data-k="phone">Phone</th><th data-k="email">Email</th><th data-k="website">Website</th><th data-k="address">Address</th><th data-k="city">City</th>
-          <th data-k="state">State</th><th data-k="timezone">Timezone</th><th data-k="date_collected">Collected</th><th data-k="source">Source</th>
+          <th data-k="state">State</th><th data-k="timezone">Timezone</th><th data-k="date_collected">Collected</th><th data-k="missing" id="missingTh" hidden>Missing</th><th data-k="source">Source</th>
         </tr></thead>
         <tbody id="rows"></tbody>
       </table>
@@ -125,7 +132,7 @@
 
 <script>
 const $ = id => document.getElementById(id);
-let leads = [], sort = { k: null, dir: 1 }, wasRunning = false, seenSources = null;
+let tab = "complete", leads = [], sort = { k: null, dir: 1 }, wasRunning = false, seenSources = null;
 
 const api = (url, body) => fetch(url, body === undefined ? {} : {
   method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body)
@@ -133,7 +140,8 @@ const api = (url, body) => fetch(url, body === undefined ? {} : {
 
 function renderLeads() {
   const q = $("search").value.trim().toLowerCase(), st = $("stateFilter").value;
-  const shown = leads.filter(l => (!st || l.state === st) &&
+  const inTab = leads.filter(l => (tab === "complete") === l.complete);
+  const shown = inTab.filter(l => (!st || l.state === st) &&
     (!q || [l.company_name, l.phone, l.email, l.address, l.city, l.state].some(v => (v || "").toLowerCase().includes(q))));
   // Until a column header is clicked, show newest first so leads appear at the top as they are found.
   if (sort.k) shown.sort((a, b) => (a[sort.k] || "").localeCompare(b[sort.k] || "") * sort.dir);
@@ -142,7 +150,7 @@ function renderLeads() {
   $("rows").replaceChildren(...shown.map(l => {
     const tr = document.createElement("tr");
     if (fresh.has(l.source + l.phone)) tr.className = "new";
-    for (const k of ["company_name", "phone", "email", "website", "address", "city", "state", "timezone", "date_collected", "source"]) {
+    for (const k of ["company_name", "phone", "email", "website", "address", "city", "state", "timezone", "date_collected", ...(tab === "partial" ? ["missing"] : []), "source"]) {
       const td = document.createElement("td");
       td.textContent = l[k] || "";
       if (k === "source") td.className = "src";
@@ -151,12 +159,19 @@ function renderLeads() {
     return tr;
   }));
   seenSources = new Set(leads.map(l => l.source + l.phone));
-  $("statTotal").textContent = leads.length;
-  $("statEmails").textContent = leads.filter(l => l.email).length;
-  $("statStates").textContent = new Set(leads.map(l => l.state).filter(Boolean)).size;
+  $("cntComplete").textContent = leads.filter(l => l.complete).length;
+  $("cntPartial").textContent = leads.filter(l => !l.complete).length;
+  $("tabComplete").classList.toggle("active", tab === "complete");
+  $("tabPartial").classList.toggle("active", tab === "partial");
+  $("missingTh").hidden = tab !== "partial";
+  $("download").href = `/api/export.csv?set=${tab}`;
+  $("statTotal").textContent = inTab.length;
+  $("statEmails").textContent = inTab.filter(l => l.email).length;
+  $("statStates").textContent = new Set(inTab.map(l => l.state).filter(Boolean)).size;
   $("statShown").textContent = shown.length;
-  $("empty").hidden = leads.length > 0;
-  const states = [...new Set(leads.map(l => l.state).filter(Boolean))].sort();
+  $("empty").hidden = inTab.length > 0;
+  $("empty").textContent = tab === "complete" ? "No complete leads yet. Click Run scrape to collect them." : "No partial leads.";
+  const states = [...new Set(inTab.map(l => l.state).filter(Boolean))].sort();
   const cur = $("stateFilter").value;
   $("stateFilter").replaceChildren(new Option("All states", ""), ...states.map(s => new Option(s, s)));
   $("stateFilter").value = states.includes(cur) ? cur : "";
@@ -184,6 +199,8 @@ async function poll() {
 }
 
 $("search").oninput = $("stateFilter").onchange = renderLeads;
+$("tabComplete").onclick = () => { tab = "complete"; renderLeads(); };
+$("tabPartial").onclick = () => { tab = "partial"; renderLeads(); };
 document.querySelectorAll("th[data-k]").forEach(th => th.onclick = () => {
   sort = { k: th.dataset.k, dir: sort.k === th.dataset.k ? -sort.dir : 1 };
   renderLeads();

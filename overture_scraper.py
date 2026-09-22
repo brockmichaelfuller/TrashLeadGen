@@ -14,7 +14,7 @@ from pathlib import Path
 import duckdb
 import requests
 
-from lead_scraper import (COLUMNS, EXCLUDE_NAME, clean_email, ensure_columns, is_complete, load_existing_phones,
+from lead_scraper import (COLUMNS, EXCLUDE_NAME, clean_email, ensure_columns, load_existing_phones,
                           normalize_phone, timezone_label)
 
 CATEGORIES = ("waste_management", "junk_removal_and_hauling", "dumpster_rental")
@@ -86,8 +86,6 @@ def run(cities_path, output_path):
                        "website": website or "", "address": address or "", "city": city or "",
                        "state": state or "", "timezone": timezone_label(state, lat, lon),
                        "source": f"overture:{release}/{place_id}", "date_collected": today}
-                if not is_complete(row):  # needs name, phone, email and timezone
-                    continue
                 seen.add(phone)
                 writer.writerow(row)
                 out.flush()

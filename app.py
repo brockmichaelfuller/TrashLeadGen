@@ -17,10 +17,11 @@ import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.parse import parse_qs
 
 ROOT = Path(__file__).parent
 sys.path.insert(0, str(ROOT))
-from lead_scraper import COLUMNS, is_complete  # noqa: E402
+from lead_scraper import COLUMNS, missing_fields  # noqa: E402
 LEADS_PATH = ROOT / "output" / "leads.csv"
 INDEX_PATH = ROOT / "static" / "index.html"
 MAX_LOG_LINES = 500
@@ -33,18 +34,25 @@ job = {"proc": None, "log": [], "started": False}
 
 
 def read_csv(path):
-    """Leads with a name, phone, email and timezone; older or incomplete rows are hidden."""
+    """All leads, each flagged complete (name, phone, email and timezone) or partial, with what's missing."""
     if not path.exists():
         return []
     with path.open(newline="", encoding="utf-8") as f:
-        return [row for row in csv.DictReader(f) if is_complete(row)]
+        rows = list(csv.DictReader(f))
+    for row in rows:
+        missing = missing_fields(row)
+        row["complete"] = not missing
+        row["missing"] = ", ".join(missing)
+    return rows
 
 
-def export_csv(path):
+def export_csv(path, which="all"):
     out = io.StringIO()
     writer = csv.DictWriter(out, fieldnames=COLUMNS, extrasaction="ignore", restval="")
     writer.writeheader()
-    writer.writerows(read_csv(path))
+    for row in read_csv(path):
+        if which == "all" or (which == "complete") == row["complete"]:
+            writer.writerow(row)
     return out.getvalue().encode()
 
 
@@ -119,7 +127,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         if not self.require_auth():
             return
-        path = self.path.split("?")[0]
+        path, _, query = self.path.partition("?")
         if path == "/":
             self.send_body(INDEX_PATH.read_bytes(), "text/html; charset=utf-8")
         elif path == "/api/leads":
@@ -129,8 +137,9 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json({"running": is_running(), "started": job["started"], "log": job["log"],
                             "failed": job["proc"] is not None and (job["proc"].poll() or 0) != 0})
         elif path == "/api/export.csv":
-            body = export_csv(LEADS_PATH)
-            self.send_body(body, "text/csv", extra={"Content-Disposition": 'attachment; filename="leads.csv"'})
+            which = {"complete": "complete", "partial": "partial"}.get(parse_qs(query).get("set", [""])[0], "all")
+            self.send_body(export_csv(LEADS_PATH, which), "text/csv",
+                           extra={"Content-Disposition": f'attachment; filename="leads-{which}.csv"'})
         else:
             self.send_body(b"Not found", "text/plain", 404)
 

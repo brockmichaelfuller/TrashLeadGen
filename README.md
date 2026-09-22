@@ -33,6 +33,7 @@ Options:
 - **Deduped by phone number.** Rerunning appends only new phones, so the script is safe to rerun or resume.
 - **Progress is saved after every state.** A failed state is reported and skipped and doesn't stop the run. Rerun to retry it.
 - `state` is the state searched, so it is always filled in. `city` comes from the OSM address and is blank when the mapper didn't add one.
+- **Complete vs partial.** A lead with a company name, phone, email and timezone is "complete". Leads missing any of those are kept but shown separately as "partial" (with what is missing). The page has a tab for each, and Download CSV exports the tab you are viewing.
 - **The company name must contain the word "waste"** (for example "Acme Waste Services"). Names like "Acme Dumpsters" or "Southwest Sanitation" are skipped.
 - Water and sewer utilities are filtered out by name. Some non-hauler noise (for example an appliance shop with "disposal" in its name) can still slip through, so review before use.
 

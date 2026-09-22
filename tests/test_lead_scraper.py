@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from lead_scraper import STATES, clean_email, element_to_row, is_complete, load_existing_phones, normalize_phone
+from lead_scraper import STATES, clean_email, element_to_row, is_complete, missing_fields, load_existing_phones, normalize_phone
 
 
 class NormalizePhoneTests(unittest.TestCase):
@@ -86,9 +86,11 @@ class RequiredFieldsTests(unittest.TestCase):
         for missing in full:
             self.assertFalse(is_complete({**full, missing: ""}), missing)
 
-    def test_scraped_row_without_email_is_dropped(self):
+    def test_scraped_row_without_email_is_kept_as_partial(self):
         tags = {"name": "Acme Waste", "phone": "303-343-7096"}
-        self.assertIsNone(element_to_row({"type": "node", "id": 1, "tags": tags}, "CO", "x"))
+        row = element_to_row({"type": "node", "id": 1, "tags": tags}, "CO", "x")
+        self.assertEqual(missing_fields(row), ["email"])
+        self.assertFalse(is_complete(row))
 
     def test_clean_email(self):
         self.assertEqual(clean_email("Info@Acme.com; other@acme.com"), "info@acme.com")

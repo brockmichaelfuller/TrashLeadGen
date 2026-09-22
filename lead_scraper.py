@@ -48,7 +48,7 @@ STATES = [
     "ND", "OH", "OK", "OR", "PA", "RI", "SC", "SD", "TN", "TX", "UT", "VT", "VA", "WA", "WV", "WI", "WY",
 ]
 PHONE_KEYS = ("phone", "contact:phone")
-REQUIRED_FIELDS = ("company_name", "phone", "email", "timezone")  # everything else is optional
+REQUIRED_FIELDS = ("company_name", "phone", "email", "timezone")  # a lead with all four is "complete"
 EMAIL_RE = re.compile(r"^[^@\s;,]+@[^@\s;,]+\.[A-Za-z]{2,}$")
 
 
@@ -61,9 +61,13 @@ def clean_email(raw):
     return ""
 
 
+def missing_fields(row):
+    """Which of name/phone/email/timezone this lead lacks (empty list means complete)."""
+    return [f for f in REQUIRED_FIELDS if not (row.get(f) or "").strip()]
+
+
 def is_complete(row):
-    """A lead is kept only with a company name, phone, email and timezone."""
-    return all((row.get(field) or "").strip() for field in REQUIRED_FIELDS)
+    return not missing_fields(row)
 
 # Fallback when a lead has no coordinates: the state's main timezone (split states use where most people live).
 STATE_TIMEZONES = {
@@ -137,7 +141,7 @@ def element_to_row(element, state, today):
         "source": f"openstreetmap:{element['type']}/{element['id']}",
         "date_collected": today,
     }
-    return row if is_complete(row) else None
+    return row
 
 
 def fetch_elements(state_code):
