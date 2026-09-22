@@ -15,14 +15,23 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import requests
+import socket
+import urllib3.util.connection as urllib3_connection
+
+# Force IPv4: Render's containers (and some other small hosts) have no outbound IPv6 route, but
+# these Overpass mirrors publish IPv6 addresses too. Left to its own devices, Python sometimes tries
+# the IPv6 address, fails with "Network is unreachable", and gives up instead of falling back to
+# IPv4 -- forcing AF_INET here skips straight to an address that's actually reachable.
+urllib3_connection.allowed_gai_family = lambda: socket.AF_INET
 
 OVERPASS_URLS = [
     "https://overpass-api.de/api/interpreter",
     "https://overpass.kumi.systems/api/interpreter",
+    "https://overpass.openstreetmap.fr/api/interpreter",
 ]
 USER_AGENT = "TrashLeadGen/0.1 (+https://github.com/brockmichaelfuller/TrashLeadGen)"
 REQUEST_DELAY_SECONDS = 5
-MAX_ATTEMPTS = 3
+MAX_ATTEMPTS = 4  # cycles through all 3 mirrors at least once, then retries the first again
 QUERY_TIMEOUT_SECONDS = 300
 
 COLUMNS = ["company_name", "phone", "email", "website", "address", "city", "state", "timezone", "source", "date_collected"]

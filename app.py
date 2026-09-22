@@ -74,19 +74,37 @@ def pump_output(proc):
     proc.wait()
 
 
-def start_run(group_id):
-    """One scrape, either the whole U.S. or (OSM only) one ~13-state group."""
-    group = next((g for g in GROUPS if g["id"] == group_id), None)
-    if group_id and group_id != "all" and not group:
-        return "Unknown group."
+FAILED_STATES_MARKER = "Failed states (rerun to retry): "
+
+
+def parse_failed_states(log_lines):
+    """States lead_scraper.py reported as failed on the last completed run, from its summary line."""
+    for line in log_lines:
+        if FAILED_STATES_MARKER in line:
+            return [s.strip() for s in line.split(FAILED_STATES_MARKER, 1)[1].split(",") if s.strip()]
+    return []
+
+
+def start_run(group_id="all", explicit_states=None):
+    """One scrape: the whole U.S., one ~13-state group, or (for the "retry failed" button) an
+    explicit list of state codes. Groups and explicit states are OSM-only; Overture is one query."""
+    if explicit_states:
+        if not USING_OSM:
+            return "Retrying specific states isn't supported by this scraper."
+        states, label = [s.upper() for s in explicit_states], f"retry: {', '.join(explicit_states)}"
+    else:
+        group = next((g for g in GROUPS if g["id"] == group_id), None)
+        if group_id and group_id != "all" and not group:
+            return "Unknown group."
+        states, label = (group["states"], group["label"]) if group else (None, "the entire U.S.")
     with lock:
         if is_running():
             return "A run is already in progress."
         cmd = [sys.executable, "-u", str(ROOT / SCRAPER_SCRIPT), "--output", str(LEADS_PATH)]
-        if group:
-            cmd += ["--states", *group["states"]]
+        if states:
+            cmd += ["--states", *states]
         proc = subprocess.Popen(cmd, cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-        job.update(proc=proc, log=[], started=True, scope=group["label"] if group else "the entire U.S.")
+        job.update(proc=proc, log=[], started=True, scope=label)
     threading.Thread(target=pump_output, args=(proc,), daemon=True).start()
     return None
 
@@ -144,8 +162,10 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json(read_csv(LEADS_PATH))
         elif path == "/api/status":
             with lock:
-                self.send_json({"running": is_running(), "started": job["started"], "log": job["log"],
+                running = is_running()
+                self.send_json({"running": running, "started": job["started"], "log": job["log"],
                             "scope": job["scope"],
+                            "failedStates": [] if running else parse_failed_states(job["log"]),
                             "failed": job["proc"] is not None and (job["proc"].poll() or 0) != 0})
         elif path == "/api/groups":
             self.send_json({"groups": GROUPS})
@@ -162,7 +182,7 @@ class Handler(BaseHTTPRequestHandler):
         path = self.path.split("?")[0]
         data = self.read_json()
         if path == "/api/run":
-            error = start_run(data.get("group", "all"))
+            error = start_run(data.get("group", "all"), data.get("states"))
             return self.send_json({"error": error}, 400) if error else self.send_json({"ok": True})
         if path == "/api/stop":
             with lock:

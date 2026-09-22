@@ -88,6 +88,7 @@
         <button class="primary" id="run">Run scrape</button>
         <button class="danger" id="stop" hidden>Stop</button>
       </div>
+      <button id="retryFailed" hidden style="margin-top:8px;width:100%"></button>
             <div class="err" id="err"></div>
     </section>
 
@@ -204,6 +205,10 @@ async function poll() {
     log.textContent = s.log.join("\n");
     if (atEnd) log.scrollTop = log.scrollHeight;
   }
+  const failed = s.failedStates || [];
+  $("retryFailed").hidden = s.running || !failed.length;
+  $("retryFailed").textContent = `Retry ${failed.length} failed state${failed.length === 1 ? "" : "s"} (${failed.join(", ")})`;
+  $("retryFailed").dataset.states = JSON.stringify(failed);
   if (s.running || wasRunning) await loadLeads();
   wasRunning = s.running;
 }
@@ -240,6 +245,12 @@ $("run").onclick = async () => {
   catch (e) { $("err").textContent = e.message; }
 };
 $("stop").onclick = () => api("/api/stop", {}).then(poll);
+
+$("retryFailed").onclick = async () => {
+  $("err").textContent = "";
+  try { await api("/api/run", { states: JSON.parse($("retryFailed").dataset.states || "[]") }); await poll(); }
+  catch (e) { $("err").textContent = e.message; }
+};
 
 $("copyEmails").onclick = async () => {
   const ok = await copyText(renderLeads().map(l => l.email).filter(Boolean).join("\n"));
