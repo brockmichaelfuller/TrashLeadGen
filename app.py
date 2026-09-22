@@ -9,6 +9,7 @@ import argparse
 import base64
 import csv
 import hmac
+import io
 import json
 import os
 import subprocess
@@ -18,6 +19,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 ROOT = Path(__file__).parent
+sys.path.insert(0, str(ROOT))
+from lead_scraper import COLUMNS, is_complete  # noqa: E402
 LEADS_PATH = ROOT / "output" / "leads.csv"
 INDEX_PATH = ROOT / "static" / "index.html"
 MAX_LOG_LINES = 500
@@ -30,10 +33,19 @@ job = {"proc": None, "log": [], "started": False}
 
 
 def read_csv(path):
+    """Leads with a name, phone, email and timezone; older or incomplete rows are hidden."""
     if not path.exists():
         return []
     with path.open(newline="", encoding="utf-8") as f:
-        return list(csv.DictReader(f))
+        return [row for row in csv.DictReader(f) if is_complete(row)]
+
+
+def export_csv(path):
+    out = io.StringIO()
+    writer = csv.DictWriter(out, fieldnames=COLUMNS, extrasaction="ignore", restval="")
+    writer.writeheader()
+    writer.writerows(read_csv(path))
+    return out.getvalue().encode()
 
 
 def is_running():
@@ -117,7 +129,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json({"running": is_running(), "started": job["started"], "log": job["log"],
                             "failed": job["proc"] is not None and (job["proc"].poll() or 0) != 0})
         elif path == "/api/export.csv":
-            body = LEADS_PATH.read_bytes() if LEADS_PATH.exists() else b""
+            body = export_csv(LEADS_PATH)
             self.send_body(body, "text/csv", extra={"Content-Disposition": 'attachment; filename="leads.csv"'})
         else:
             self.send_body(b"Not found", "text/plain", 404)

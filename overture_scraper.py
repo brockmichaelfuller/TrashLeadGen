@@ -14,7 +14,8 @@ from pathlib import Path
 import duckdb
 import requests
 
-from lead_scraper import COLUMNS, EXCLUDE_NAME, ensure_columns, load_existing_phones, normalize_phone, timezone_label
+from lead_scraper import (COLUMNS, EXCLUDE_NAME, clean_email, ensure_columns, is_complete, load_existing_phones,
+                          normalize_phone, timezone_label)
 
 CATEGORIES = ("waste_management", "junk_removal_and_hauling", "dumpster_rental")
 # Strong pickup terms only; the hauler filter in lead_scraper.EXCLUDE_NAME removes the rest of the noise.
@@ -81,12 +82,14 @@ def run(cities_path, output_path):
                 phone = normalize_phone(raw_phone)
                 if not phone or phone in seen or EXCLUDE_NAME.search(name):
                     continue
+                row = {"company_name": name.strip(), "phone": phone, "email": clean_email(email),
+                       "website": website or "", "address": address or "", "city": city or "",
+                       "state": state or "", "timezone": timezone_label(state, lat, lon),
+                       "source": f"overture:{release}/{place_id}", "date_collected": today}
+                if not is_complete(row):  # needs name, phone, email and timezone
+                    continue
                 seen.add(phone)
-                writer.writerow({"company_name": name.strip(), "phone": phone, "email": (email or "").strip().lower(),
-                                 "website": website or "", "address": address or "", "city": city or "",
-                                 "state": state or "", "timezone": timezone_label(state, lat, lon),
-                                 "source": f"overture:{release}/{place_id}",
-                                 "date_collected": today})
+                writer.writerow(row)
                 out.flush()
                 new += 1
                 if new % 25 == 0:

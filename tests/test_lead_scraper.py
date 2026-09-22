@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from lead_scraper import STATES, element_to_row, load_existing_phones, normalize_phone
+from lead_scraper import STATES, clean_email, element_to_row, is_complete, load_existing_phones, normalize_phone
 
 
 class NormalizePhoneTests(unittest.TestCase):
@@ -27,7 +27,7 @@ class ElementToRowTests(unittest.TestCase):
         return {"type": "node", "id": 1, "tags": tags}
 
     def test_builds_row_with_search_state(self):
-        row = element_to_row(self.element(name="Acme Waste", phone="303-343-7096", **{"addr:city": "Denver"}), "CO", "2026-01-01")
+        row = element_to_row(self.element(name="Acme Waste", phone="303-343-7096", email="info@acme.com", **{"addr:city": "Denver"}), "CO", "2026-01-01")
         self.assertEqual(row["city"], "Denver")
         self.assertEqual(row["state"], "CO")
         self.assertEqual(row["source"], "openstreetmap:node/1")
@@ -46,7 +46,7 @@ class MoreTests(unittest.TestCase):
         for name in ("Wasted Ink Zine Distro", "The Unwaste Shop"):
             tags = {"name": name, "phone": "303-343-7096"}
             self.assertIsNone(element_to_row({"type": "node", "id": 1, "tags": tags}, "CO", "x"))
-        tags = {"name": "Acme Waste Services", "phone": "303-343-7096"}
+        tags = {"name": "Acme Waste Services", "phone": "303-343-7096", "email": "info@acme.com"}
         self.assertIsNotNone(element_to_row({"type": "node", "id": 1, "tags": tags}, "CO", "x"))
 
     def test_name_must_contain_waste(self):
@@ -60,7 +60,7 @@ class MoreTests(unittest.TestCase):
             tags = {"name": name, "phone": "303-343-7096"}
             self.assertIsNone(element_to_row({"type": "node", "id": 1, "tags": tags}, "CO", "x"), name)
         for name in ("ABC Waste Services", "Metro Roll-Off Waste Hauling", "Tri-County Waste Disposal"):
-            tags = {"name": name, "phone": "303-343-7096"}
+            tags = {"name": name, "phone": "303-343-7096", "email": "a@b.com"}
             self.assertIsNotNone(element_to_row({"type": "node", "id": 1, "tags": tags}, "CO", "x"), name)
 
 
@@ -77,6 +77,24 @@ class ExistingPhonesTests(unittest.TestCase):
             self.assertIn("(303) 343-7096", phones)
             self.assertIn("(480) 400-3393", phones)
             self.assertEqual(load_existing_phones(Path(tmp) / "missing.csv"), set())
+
+
+class RequiredFieldsTests(unittest.TestCase):
+    def test_lead_needs_name_phone_email_and_timezone(self):
+        full = {"company_name": "A Waste", "phone": "(303) 343-7096", "email": "a@b.com", "timezone": "Mountain"}
+        self.assertTrue(is_complete(full))
+        for missing in full:
+            self.assertFalse(is_complete({**full, missing: ""}), missing)
+
+    def test_scraped_row_without_email_is_dropped(self):
+        tags = {"name": "Acme Waste", "phone": "303-343-7096"}
+        self.assertIsNone(element_to_row({"type": "node", "id": 1, "tags": tags}, "CO", "x"))
+
+    def test_clean_email(self):
+        self.assertEqual(clean_email("Info@Acme.com; other@acme.com"), "info@acme.com")
+        self.assertEqual(clean_email("mailto:hi@acme.com"), "hi@acme.com")
+        self.assertEqual(clean_email("not an email"), "")
+        self.assertEqual(clean_email(None), "")
 
 
 if __name__ == "__main__":
