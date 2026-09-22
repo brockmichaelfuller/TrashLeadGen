@@ -61,6 +61,9 @@
   th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line); white-space: nowrap; }
   td:first-child { white-space: normal; min-width: 180px; }
   td:nth-child(3), td:nth-child(4) { white-space: normal; overflow-wrap: anywhere; min-width: 200px; }  /* full email / website, wrapped */
+  td.interested select { min-width: 130px; }
+  td.notes { min-width: 220px; }
+  td.notes input { min-width: 200px; }
   th { color: var(--muted); font-weight: 600; font-size: 12px; cursor: pointer; user-select: none; }
   th:hover { color: var(--text); }
   tbody tr:hover { background: var(--row); }
@@ -124,7 +127,8 @@
       <table>
         <thead><tr>
           <th data-k="company_name">Company</th><th data-k="phone">Phone</th><th data-k="email">Email</th><th data-k="website">Website</th><th data-k="address">Address</th><th data-k="city">City</th>
-          <th data-k="state">State</th><th data-k="timezone">Timezone</th><th data-k="date_collected">Collected</th><th data-k="missing" id="missingTh" hidden>Missing</th><th data-k="source">Source</th>
+          <th data-k="state">State</th><th data-k="timezone">Timezone</th><th data-k="date_collected">Collected</th><th data-k="missing" id="missingTh" hidden>Missing</th>
+          <th data-k="status">Interested?</th><th>Notes</th><th data-k="source">Source</th>
         </tr></thead>
         <tbody id="rows"></tbody>
       </table>
@@ -142,6 +146,40 @@ const api = (url, body) => fetch(url, body === undefined ? {} : {
   method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body)
 }).then(async r => { const j = await r.json(); if (!r.ok) throw new Error(j.error || "Request failed"); return j; });
 
+async function saveLead(phone, updates) {
+  try { await api("/api/lead", { phone, ...updates }); }
+  catch (e) { $("err").textContent = e.message; }
+}
+
+function statusCell(l) {
+  const td = document.createElement("td");
+  td.className = "interested";
+  const sel = document.createElement("select");
+  for (const [value, label] of [["", "—"], ["Interested", "Interested"], ["Not interested", "Not interested"]]) {
+    sel.append(new Option(label, value));
+  }
+  sel.value = l.status || "";
+  sel.onchange = () => { l.status = sel.value; saveLead(l.phone, { status: sel.value, notes: l.notes || "" }); };
+  td.append(sel);
+  return td;
+}
+
+function notesCell(l) {
+  const td = document.createElement("td");
+  td.className = "notes";
+  const inp = document.createElement("input");
+  inp.type = "text";
+  inp.placeholder = "What happened when we called…";
+  inp.value = l.notes || "";
+  inp.onblur = () => {
+    if (inp.value === (l.notes || "")) return;
+    l.notes = inp.value;
+    saveLead(l.phone, { status: l.status || "", notes: inp.value });
+  };
+  td.append(inp);
+  return td;
+}
+
 function renderLeads() {
   const q = $("search").value.trim().toLowerCase(), st = $("stateFilter").value;
   const inTab = leads.filter(l => (tab === "complete") === l.complete);
@@ -154,12 +192,16 @@ function renderLeads() {
   $("rows").replaceChildren(...shown.map(l => {
     const tr = document.createElement("tr");
     if (fresh.has(l.source + l.phone)) tr.className = "new";
-    for (const k of ["company_name", "phone", "email", "website", "address", "city", "state", "timezone", "date_collected", ...(tab === "partial" ? ["missing"] : []), "source"]) {
+    for (const k of ["company_name", "phone", "email", "website", "address", "city", "state", "timezone", "date_collected", ...(tab === "partial" ? ["missing"] : [])]) {
       const td = document.createElement("td");
       td.textContent = l[k] || "";
-      if (k === "source") td.className = "src";
       tr.append(td);
     }
+    tr.append(statusCell(l), notesCell(l));
+    const src = document.createElement("td");
+    src.textContent = l.source || "";
+    src.className = "src";
+    tr.append(src);
     return tr;
   }));
   seenSources = new Set(leads.map(l => l.source + l.phone));

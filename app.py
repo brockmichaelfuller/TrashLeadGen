@@ -51,6 +51,25 @@ def read_csv(path):
     return rows
 
 
+def update_lead(path, phone, updates):
+    """Set status/notes on the row with this phone number. Returns False if the phone isn't found."""
+    if not path.exists():
+        return False
+    with path.open(newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        fieldnames = reader.fieldnames
+        rows = list(reader)
+    row = next((r for r in rows if r.get("phone") == phone), None)
+    if row is None:
+        return False
+    row.update(updates)
+    with path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+    return True
+
+
 def export_csv(path, which="all"):
     out = io.StringIO()
     writer = csv.DictWriter(out, fieldnames=COLUMNS, extrasaction="ignore", restval="")
@@ -189,6 +208,14 @@ class Handler(BaseHTTPRequestHandler):
                 if is_running():
                     job["proc"].terminate()
             return self.send_json({"ok": True})
+        if path == "/api/lead":
+            phone = (data.get("phone") or "").strip()
+            updates = {k: data.get(k, "") for k in ("status", "notes") if k in data}
+            if not phone or not updates:
+                return self.send_json({"error": "phone and at least one of status/notes are required"}, 400)
+            with lock:
+                ok = update_lead(LEADS_PATH, phone, updates)
+            return self.send_json({"ok": True}) if ok else self.send_json({"error": "Lead not found"}, 404)
         self.send_json({"error": "Not found"}, 404)
 
 

@@ -36,6 +36,7 @@ Options:
 - **Complete vs partial.** A lead with a company name, phone, email and timezone is "complete". Leads missing any of those are kept but shown separately as "partial" (with what is missing). The page has a tab for each, and Download CSV exports the tab you are viewing.
 - **The company name must contain the word "waste"** (for example "Acme Waste Services"). Names like "Acme Dumpsters" or "Southwest Sanitation" are skipped.
 - Water and sewer utilities are filtered out by name. Some non-hauler noise (for example an appliance shop with "disposal" in its name) can still slip through, so review before use.
+- **`status` and `notes`** start blank and aren't set by the scraper. Once Thomas has reviewed the list and outreach begins, use the "Interested?" dropdown and Notes field on each row to record the outcome of a call — they save immediately, and both columns are included in the CSV export. On Render's free plan these are wiped along with everything else on redeploy/restart, since there's no persistent disk (see below).
 
 ## Tests
 

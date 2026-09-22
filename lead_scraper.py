@@ -34,7 +34,8 @@ REQUEST_DELAY_SECONDS = 5
 MAX_ATTEMPTS = 4  # cycles through all 3 mirrors at least once, then retries the first again
 QUERY_TIMEOUT_SECONDS = 300
 
-COLUMNS = ["company_name", "phone", "email", "website", "address", "city", "state", "timezone", "source", "date_collected"]
+COLUMNS = ["company_name", "phone", "email", "website", "address", "city", "state", "timezone", "source",
+           "date_collected", "status", "notes"]
 
 NAME_REGEX = "waste"
 # The name must contain "waste" as a whole word (plurals allowed), so "Wasted Ink" or "Unwaste" don't match.
