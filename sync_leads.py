@@ -103,7 +103,10 @@ def push_sheets(local_path):
         return
     base = f"https://sheets.googleapis.com/v4/spreadsheets/{sheet_id}/values"
     try:
-        session.post(f"{base}/A1:clear", timeout=15)
+        # "A1" alone names a single cell, not the whole sheet -- clearing just that one cell left
+        # every previous run's rows past the end of a *shorter* new push (e.g. after a deletion)
+        # sitting there untouched, so the sheet kept accumulating stale leftover rows.
+        session.post(f"{base}/A1:Z100000:clear", timeout=15)
         response = session.put(f"{base}/A1?valueInputOption=RAW", json={"values": rows}, timeout=15)
         if response.status_code != 200:
             _warn("Google Sheets push", f"HTTP {response.status_code}: {response.text[:200]}")

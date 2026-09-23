@@ -123,7 +123,10 @@ class SheetsEnabledTests(unittest.TestCase):
                 writer.writerow(["Acme Waste", "(555) 123-4567"])
             sync_leads.push_sheets(path)
         mock_session.post.assert_called_once()
-        self.assertIn("A1:clear", mock_session.post.call_args.args[0])
+        # Must clear a wide range, not just cell A1 -- clearing only A1 previously left stale rows
+        # behind whenever a push had fewer rows than the sheet's previous content (e.g. after a
+        # deletion), so the sheet kept accumulating leftovers instead of ever actually shrinking.
+        self.assertIn("A1:Z100000:clear", mock_session.post.call_args.args[0])
         sent_values = mock_session.put.call_args.kwargs["json"]["values"]
         self.assertEqual(sent_values, [["company_name", "phone"], ["Acme Waste", "(555) 123-4567"]])
 
