@@ -56,10 +56,18 @@ class MoreTests(unittest.TestCase):
         tags = {"name": "Acme Waste Services", "phone": "303-343-7096", "email": "info@acme.com"}
         self.assertIsNotNone(element_to_row({"type": "node", "id": 1, "tags": tags}, "CO", "x"))
 
-    def test_name_must_contain_waste(self):
-        for name in ("Acme Dumpsters", "Southwest Sanitation", "Toyland Hauling"):
+    def test_name_must_contain_a_hauling_keyword(self):
+        # "Dumpsters" and "Hauling" alone are too generic (dumpster rental, moving companies, etc.)
+        # and aren't in the keyword list, so these are skipped even though they're plausible names.
+        for name in ("Acme Dumpsters", "Toyland Hauling"):
             tags = {"name": name, "phone": "303-343-7096"}
-            self.assertIsNone(element_to_row({"type": "node", "id": 1, "tags": tags}, "CO", "x"))
+            self.assertIsNone(element_to_row({"type": "node", "id": 1, "tags": tags}, "CO", "x"), name)
+        # The word doesn't have to be "waste" specifically -- garbage/trash/sanitation/refuse/
+        # disposal/rubbish all count, since the point is "residential trash hauler," not the word.
+        for name in ("Southwest Sanitation", "Downtown Trash Removal", "Acme Garbage Co",
+                     "City Refuse Pickup", "Acme Disposal Services", "Olde Towne Rubbish Co"):
+            tags = {"name": name, "phone": "303-343-7096"}
+            self.assertIsNotNone(element_to_row({"type": "node", "id": 1, "tags": tags}, "CO", "x"), name)
 
     def test_only_garbage_pickup_companies_are_kept(self):
         for name in ("Colorado Medical Waste", "Marine Sanitation & Supply", "Sunset Landfill Waste",

@@ -37,8 +37,11 @@ QUERY_TIMEOUT_SECONDS = 300
 COLUMNS = ["company_name", "phone", "email", "website", "address", "city", "state", "timezone", "source",
            "date_collected", "status", "notes"]
 
-NAME_REGEX = "waste"
-# The name must contain "waste" as a whole word (plurals allowed), so "Wasted Ink" or "Unwaste" don't match.
+NAME_KEYWORDS = ["waste", "garbage", "trash", "sanitation", "refuse", "disposal", "rubbish"]
+NAME_REGEX = "|".join(NAME_KEYWORDS)
+# The name must contain one of these as a whole word (plurals allowed), so "Wasted Ink" or "Unwaste"
+# don't match. The point isn't the word "waste" specifically -- it's that the business reads as a
+# residential trash hauler by name; EXCLUDE_NAME below is what actually narrows that down.
 KEYWORD_NAME = re.compile(rf"\b({NAME_REGEX})s?\b", re.I)
 # Keep only private garbage/waste pickup companies: drop utilities, medical/hazardous waste, marine and
 # portable sanitation, landfills/transfer stations, scrap and recycling yards, equipment sellers, and

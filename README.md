@@ -34,7 +34,7 @@ Options:
 - **Progress is saved after every state.** A failed state is reported and skipped and doesn't stop the run. Rerun to retry it.
 - `state` is the state searched, so it is always filled in. `city` comes from the OSM address and is blank when the mapper didn't add one.
 - **Complete vs partial.** A lead with a company name, phone, email and timezone is "complete". Leads missing any of those are kept but shown separately as "partial" (with what is missing). The page has a tab for each, and Download CSV exports the tab you are viewing.
-- **The company name must contain the word "waste"** (for example "Acme Waste Services"). Names like "Acme Dumpsters" or "Southwest Sanitation" are skipped.
+- **The company name must contain a hauling-related word** — waste, garbage, trash, sanitation, refuse, disposal, or rubbish (for example "Acme Waste Services" or "Southwest Sanitation"). Names with only a generic word like "Dumpsters" or "Hauling" are skipped, since those alone are as likely to be a dumpster-rental or moving company as a trash hauler.
 - Water and sewer utilities are filtered out by name. Some non-hauler noise (for example an appliance shop with "disposal" in its name) can still slip through, so review before use.
 - **`status` and `notes`** start blank and aren't set by the scraper. Once Thomas has reviewed the list and outreach begins, use the "Interested?" dropdown and Notes field on each row to record the outcome of a call — they save immediately, and both columns are included in the CSV export. On Render's free plan these are wiped along with everything else on redeploy/restart, since there's no persistent disk (see below).
 
