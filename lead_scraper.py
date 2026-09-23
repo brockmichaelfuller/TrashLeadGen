@@ -10,6 +10,7 @@ import csv
 import re
 import sys
 import time
+import traceback
 from datetime import date, datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -257,24 +258,30 @@ def run(output_path, states):
         if write_header:
             writer.writeheader()
         for i, state in enumerate(states):
-            seen |= load_existing_phones(output_path)  # pick up rows another scraper added meanwhile
+            # Everything for this state -- fetching, writing, and backing up -- is inside one try, so
+            # a failure anywhere in it (not just the network call) can never kill the whole run. It
+            # used to wrap only fetch_elements(); a failure past that point (writing the row, the
+            # backup sync) would crash the process outright instead of just skipping the state.
             try:
+                seen |= load_existing_phones(output_path)  # pick up rows another scraper added meanwhile
                 elements = fetch_elements(state)
+                new = 0
+                for element in elements:
+                    row = element_to_row(element, state, today)
+                    if row and row["phone"] not in seen:
+                        seen.add(row["phone"])
+                        writer.writerow(row)
+                        new += 1
+                out.flush()  # keep progress if the run is interrupted later
+                sync_leads.sync(output_path)  # and back it up, since a restart wipes the local disk
+                total_new += new
+                print(f"[{i + 1}/{len(states)}] {state}: {new} new companies")
             except Exception as error:  # one bad state must not stop the run
-                print(f"[{i + 1}/{len(states)}] {state}: skipped -- {_friendly_error(error)}", file=sys.stderr)
+                message = _friendly_error(error)
+                print(f"[{i + 1}/{len(states)}] {state}: skipped -- {message}", file=sys.stderr)
+                if message == "the map data source had a temporary problem":  # not a recognized network
+                    traceback.print_exc(file=sys.stderr)                      # error -- keep detail to debug
                 failed.append(state)
-                continue
-            new = 0
-            for element in elements:
-                row = element_to_row(element, state, today)
-                if row and row["phone"] not in seen:
-                    seen.add(row["phone"])
-                    writer.writerow(row)
-                    new += 1
-            out.flush()  # keep progress if the run is interrupted later
-            sync_leads.sync(output_path)  # and back it up, since a restart wipes the local disk
-            total_new += new
-            print(f"[{i + 1}/{len(states)}] {state}: {new} new companies")
             time.sleep(REQUEST_DELAY_SECONDS)
 
     print(f"Done. {total_new} new rows -> {output_path} ({len(seen)} total unique phones)")

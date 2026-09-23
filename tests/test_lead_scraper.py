@@ -2,8 +2,10 @@ import csv
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
-from lead_scraper import STATE_GROUPS, STATES, clean_email, element_to_row, is_complete, missing_fields, load_existing_phones, normalize_phone
+import lead_scraper
+from lead_scraper import STATE_GROUPS, STATES, clean_email, element_to_row, is_complete, missing_fields, load_existing_phones, normalize_phone, run
 
 
 class NormalizePhoneTests(unittest.TestCase):
@@ -154,6 +156,29 @@ class RequiredFieldsTests(unittest.TestCase):
         self.assertEqual(clean_email("mailto:hi@acme.com"), "hi@acme.com")
         self.assertEqual(clean_email("not an email"), "")
         self.assertEqual(clean_email(None), "")
+
+
+class RunResilienceTests(unittest.TestCase):
+    """Hit live: a failure past the network fetch (in this case, the backup sync step) crashed the
+    whole run instead of just skipping that one state, because only fetch_elements() was wrapped in
+    a try/except. The whole per-state body is wrapped now -- this proves a state that raises partway
+    through doesn't stop the next one from being processed."""
+
+    def test_a_failure_after_a_successful_fetch_does_not_abort_the_run(self):
+        elements = {
+            "CO": [{"type": "node", "id": 1, "tags": {"name": "Acme Waste", "phone": "303-343-7096"}}],
+            "WY": [{"type": "node", "id": 2, "tags": {"name": "Rocky Mountain Waste", "phone": "307-555-0100"}}],
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            output_path = Path(tmp) / "leads.csv"
+            with patch("lead_scraper.fetch_elements", side_effect=lambda state: elements[state]), \
+                 patch.object(lead_scraper.sync_leads, "restore"), \
+                 patch.object(lead_scraper.sync_leads, "sync", side_effect=[RuntimeError("simulated backup failure"), None]), \
+                 patch("lead_scraper.time.sleep"):
+                run(output_path, ["CO", "WY"])  # must not raise, even though CO's backup sync blows up
+            with output_path.open() as f:
+                rows = list(csv.DictReader(f))
+        self.assertEqual({r["company_name"] for r in rows}, {"Acme Waste", "Rocky Mountain Waste"})
 
 
 if __name__ == "__main__":
