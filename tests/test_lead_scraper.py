@@ -103,6 +103,13 @@ class MoreTests(unittest.TestCase):
             tags = {"name": name, "phone": "303-343-7096"}
             self.assertIsNone(element_to_row({"type": "node", "id": 1, "tags": tags}, "CO", "x"), name)
 
+    def test_tire_and_textile_recyclers_are_excluded(self):
+        # Caught live on a real scrape: both matched on "waste" but are tire/rag recyclers, not
+        # residential curbside haulers.
+        for name in ("American Waste & Textile, LLC", "Paracha Brothers-Tire Waste Management"):
+            tags = {"name": name, "phone": "303-343-7096"}
+            self.assertIsNone(element_to_row({"type": "node", "id": 1, "tags": tags}, "CO", "x"), name)
+
     def test_thrift_and_antique_stores_using_trash_in_the_name_are_excluded(self):
         for name in ("Trash & Treasures", "Trash to Treasure Antiques", "Vintage Trash Consignment"):
             tags = {"name": name, "phone": "303-343-7096"}

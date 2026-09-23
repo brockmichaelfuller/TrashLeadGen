@@ -73,7 +73,8 @@ EXCLUDE_NAME = re.compile(
     r"campus|sustainability|headquarters|corporate office|\bstore\b|\bshop\b|\bmarket\b|"
     r"treasures|antique|consignment|thrift|vintage|"
     r"\bmov(ing|ers)\b|relocation|"
-    r"pet waste|dog waste|pooper|\bpoop\b|\bscoop",
+    r"pet waste|dog waste|pooper|\bpoop\b|\bscoop|"
+    r"\btires?\b|textile",
     re.I,
 )
 EXCLUDE_MAN_MADE = {"wastewater_plant", "water_works", "water_tower", "storage_tank", "pumping_station"}
