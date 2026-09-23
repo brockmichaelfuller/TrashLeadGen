@@ -385,24 +385,36 @@ def run(output_path, states):
         for round_num in range(1, RETRY_ROUNDS + 1):
             still_failing = []
             for i, state in enumerate(remaining):
-                new, error = _attempt_state(state, writer, out, output_path, seen, today)
-                if error is None:
-                    total_new += new
-                    label = f"[{i + 1}/{len(remaining)}]" if round_num == 1 else "retry succeeded:"
-                    print(f"{label} {state}: {new} new companies")
-                else:
-                    message = _friendly_error(error)
-                    label = f"[{i + 1}/{len(remaining)}]" if round_num == 1 else "still failing after retry:"
-                    print(f"{label} {state}: skipped -- {message}", file=sys.stderr)
-                    log_debug_detail(output_path, state, error)  # the real exception, for /api/debug.log
-                    still_failing.append(state)                  # -- never shown in the user-facing log
-                time.sleep(REQUEST_DELAY_SECONDS)
+                # This whole iteration -- not just _attempt_state's own internals -- must be unable
+                # to kill the run. It wasn't: the logging/sleep below used to sit outside any try, so
+                # a failure here (hit live) crashed the process after only 2 of 13 states with no
+                # explanation, the same class of bug _attempt_state itself was built to prevent.
+                try:
+                    new, error = _attempt_state(state, writer, out, output_path, seen, today)
+                    if error is None:
+                        total_new += new
+                        label = f"[{i + 1}/{len(remaining)}]" if round_num == 1 else "retry succeeded:"
+                        print(f"{label} {state}: {new} new companies")
+                    else:
+                        message = _friendly_error(error)
+                        label = f"[{i + 1}/{len(remaining)}]" if round_num == 1 else "still failing after retry:"
+                        print(f"{label} {state}: skipped -- {message}", file=sys.stderr)
+                        log_debug_detail(output_path, state, error)  # the real exception, for /api/debug.log
+                        still_failing.append(state)                  # -- never shown in the user-facing log
+                    time.sleep(REQUEST_DELAY_SECONDS)
+                except Exception as error:
+                    print(f"{state}: skipped -- the map data source had a temporary problem", file=sys.stderr)
+                    log_debug_detail(output_path, state, error)
+                    still_failing.append(state)
             remaining = still_failing
             if not remaining or round_num == RETRY_ROUNDS:
                 break
-            print(f"{len(remaining)} state(s) had a temporary problem -- retrying automatically "
-                  f"in {RETRY_ROUND_DELAY_SECONDS}s: {', '.join(remaining)}")
-            time.sleep(RETRY_ROUND_DELAY_SECONDS)
+            try:
+                print(f"{len(remaining)} state(s) had a temporary problem -- retrying automatically "
+                      f"in {RETRY_ROUND_DELAY_SECONDS}s: {', '.join(remaining)}")
+                time.sleep(RETRY_ROUND_DELAY_SECONDS)
+            except Exception:
+                pass
 
     print(f"Done. {total_new} new rows -> {output_path} ({len(seen)} total unique phones)")
     if remaining:

@@ -230,6 +230,35 @@ class RunResilienceTests(unittest.TestCase):
         summary_lines = [c.args[0] for c in mock_print.call_args_list if c.args]
         self.assertTrue(any("Failed states (rerun to retry): CO" in line for line in summary_lines), summary_lines)
 
+    def test_a_failure_in_the_logging_around_attempt_state_does_not_abort_the_run(self):
+        # Hit live: the per-state loop's own print()/log_debug_detail()/sleep() calls sat outside
+        # any try/except (only _attempt_state's internals were covered), so a failure there crashed
+        # the whole run after only 2 of 13 states with no explanation. This reproduces that failure
+        # mode directly -- log_debug_detail raising for AL -- and proves AK still gets processed.
+        elements = {
+            "AL": [{"type": "node", "id": 1, "tags": {"name": "Acme Waste", "phone": "205-555-0100"}}],
+            "AK": [{"type": "node", "id": 2, "tags": {"name": "Alaska Waste", "phone": "907-555-0100"}}],
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            output_path = Path(tmp) / "leads.csv"
+            calls = []
+
+            def flaky_log_debug_detail(*args):
+                calls.append(args)
+                if len(calls) == 1:
+                    raise OSError("disk hiccup")
+
+            with patch("lead_scraper.fetch_elements", side_effect=RuntimeError("boom")), \
+                 patch("lead_scraper.log_debug_detail", side_effect=flaky_log_debug_detail), \
+                 patch.object(lead_scraper.sync_leads, "restore"), \
+                 patch.object(lead_scraper.sync_leads, "sync"), \
+                 patch("lead_scraper.time.sleep"), \
+                 patch("builtins.print") as mock_print:
+                run(output_path, ["AL", "AK"])  # must not raise despite AL's logging call blowing up
+        printed_states = {c.args[0].split(":")[0].split()[-1] for c in mock_print.call_args_list
+                          if c.args and "skipped" in c.args[0]}
+        self.assertIn("AK", printed_states)  # AK was still reached after AL's crash
+
 
 class WebsiteResidentialPickupCheckTests(unittest.TestCase):
     def test_no_website_is_kept_unverified(self):
