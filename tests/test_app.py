@@ -1,6 +1,9 @@
+import csv
+import tempfile
 import unittest
+from pathlib import Path
 
-from app import parse_failed_states
+from app import delete_lead, parse_failed_states
 
 
 class ParseFailedStatesTests(unittest.TestCase):
@@ -49,6 +52,34 @@ class ParseFailedStatesTests(unittest.TestCase):
             "Failed states (rerun to retry): CO",
         ]
         self.assertEqual(parse_failed_states(log), ["CO"])
+
+
+class DeleteLeadTests(unittest.TestCase):
+    def test_removes_only_the_matching_row(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "leads.csv"
+            with path.open("w", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=["company_name", "phone"])
+                writer.writeheader()
+                writer.writerow({"company_name": "Keep Me", "phone": "111"})
+                writer.writerow({"company_name": "Remove Me", "phone": "222"})
+            self.assertTrue(delete_lead(path, "222"))
+            with path.open() as f:
+                rows = list(csv.DictReader(f))
+        self.assertEqual([r["company_name"] for r in rows], ["Keep Me"])
+
+    def test_returns_false_for_an_unknown_phone(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "leads.csv"
+            with path.open("w", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=["company_name", "phone"])
+                writer.writeheader()
+                writer.writerow({"company_name": "A", "phone": "111"})
+            self.assertFalse(delete_lead(path, "999"))
+
+    def test_returns_false_when_the_file_does_not_exist(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertFalse(delete_lead(Path(tmp) / "missing.csv", "111"))
 
 
 if __name__ == "__main__":

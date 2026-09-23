@@ -72,6 +72,26 @@ def update_lead(path, phone, updates):
     return True
 
 
+def delete_lead(path, phone):
+    """Remove the row with this phone number outright -- for a lead that never should have matched
+    (wrong business type), as opposed to a real hauler marked "Do not contact". Returns False if the
+    phone isn't found."""
+    if not path.exists():
+        return False
+    with path.open(newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        fieldnames = reader.fieldnames
+        rows = list(reader)
+    remaining = [r for r in rows if r.get("phone") != phone]
+    if len(remaining) == len(rows):
+        return False
+    with path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(remaining)
+    return True
+
+
 # Leads marked with either of these are kept in the UI (for the record) but left out of every
 # export and copy action, so a "do not contact" or declined lead can't accidentally get dialed.
 DO_NOT_EXPORT_STATUSES = {"Not interested", "Do not contact"}
@@ -242,6 +262,15 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json({"error": "phone and at least one of status/notes are required"}, 400)
             with lock:
                 ok = update_lead(LEADS_PATH, phone, updates)
+            if ok:
+                sync_leads.sync(LEADS_PATH)
+            return self.send_json({"ok": True}) if ok else self.send_json({"error": "Lead not found"}, 404)
+        if path == "/api/lead/delete":
+            phone = (data.get("phone") or "").strip()
+            if not phone:
+                return self.send_json({"error": "phone is required"}, 400)
+            with lock:
+                ok = delete_lead(LEADS_PATH, phone)
             if ok:
                 sync_leads.sync(LEADS_PATH)
             return self.send_json({"ok": True}) if ok else self.send_json({"error": "Lead not found"}, 404)
