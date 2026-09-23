@@ -172,17 +172,9 @@ class Handler(BaseHTTPRequestHandler):
             return {}
 
     def do_GET(self):
-        path, _, query = self.path.partition("?")
-        params = parse_qs(query)
-        # A separate, token-gated door onto the CSV: Google Sheets' IMPORTDATA (and similar tools)
-        # can't do HTTP Basic auth, so this lets it pull the export directly without exposing the
-        # rest of the site. EXPORT_TOKEN is unset by default, so this stays off unless configured.
-        export_token = os.environ.get("EXPORT_TOKEN")
-        if path == "/api/export.csv" and export_token and hmac.compare_digest(params.get("token", [""])[0], export_token):
-            which = {"complete": "complete", "partial": "partial"}.get(params.get("set", [""])[0], "all")
-            return self.send_body(export_csv(LEADS_PATH, which), "text/csv")
         if not self.require_auth():
             return
+        path, _, query = self.path.partition("?")
         if path == "/":
             self.send_body(INDEX_PATH.read_bytes(), "text/html; charset=utf-8")
         elif path == "/api/leads":
@@ -197,7 +189,7 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/api/groups":
             self.send_json({"groups": GROUPS})
         elif path == "/api/export.csv":
-            which = {"complete": "complete", "partial": "partial"}.get(params.get("set", [""])[0], "all")
+            which = {"complete": "complete", "partial": "partial"}.get(parse_qs(query).get("set", [""])[0], "all")
             self.send_body(export_csv(LEADS_PATH, which), "text/csv",
                            extra={"Content-Disposition": f'attachment; filename="leads-{which}.csv"'})
         else:
