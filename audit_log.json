@@ -1,0 +1,18 @@
+{
+  "_comment": "Tracks which leads have already been manually/AI-reviewed for being a genuine residential curbside weekly trash hauler (not bulk-only, dumpster rental, junk removal, government facility, etc.). Read by the recurring audit process so it only reviews leads it hasn't seen before, instead of starting over every time a new session runs it. Update this file (add newly-reviewed phones, keep the JSON valid) and commit it whenever the audit runs, regardless of which session is running it.",
+  "reviewed": {
+    "(336) 573-1616": {"company": "Waste Management - Stoneville, NC", "verdict": "kept", "reviewed_at": "2026-09-23"},
+    "(352) 463-6200": {"company": "Waste Pro", "verdict": "kept", "reviewed_at": "2026-09-23"},
+    "(386) 788-8890": {"company": "Waste Pro", "verdict": "kept", "reviewed_at": "2026-09-23"},
+    "(520) 895-3441": {"company": "Waste Disposal", "verdict": "kept", "reviewed_at": "2026-09-23"},
+    "(530) 335-2723": {"company": "Burney Disposal Inc", "verdict": "kept", "reviewed_at": "2026-09-23"},
+    "(559) 276-8314": {"company": "Alamos Sanitation Services", "verdict": "kept", "reviewed_at": "2026-09-23"},
+    "(704) 636-3581": {"company": "All American Disposal Corp.", "verdict": "kept", "reviewed_at": "2026-09-23"},
+    "(707) 552-3110": {"company": "Recology Vallejo", "verdict": "kept", "reviewed_at": "2026-09-23"},
+    "(719) 634-7177": {"company": "Springs Waste Systems", "verdict": "kept", "reviewed_at": "2026-09-23"},
+    "(800) 299-4898": {"company": "Consolidated Disposal Service", "verdict": "kept", "reviewed_at": "2026-09-23"},
+    "(912) 352-2229": {"company": "Curbie Sanitation", "verdict": "kept", "reviewed_at": "2026-09-23"},
+    "(919) 989-1562": {"company": "All Star Waste Services", "verdict": "kept", "reviewed_at": "2026-09-23"},
+    "(970) 226-3396": {"company": "RAM Waste Systems", "verdict": "kept", "reviewed_at": "2026-09-23"}
+  }
+}
