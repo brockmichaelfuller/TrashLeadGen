@@ -22,7 +22,7 @@ from urllib.parse import parse_qs
 
 ROOT = Path(__file__).parent
 sys.path.insert(0, str(ROOT))
-from lead_scraper import COLUMNS, STATE_GROUPS, missing_fields  # noqa: E402
+from lead_scraper import COLUMNS, STATE_GROUPS, dedupe_by_phone, missing_fields  # noqa: E402
 import sync_leads  # noqa: E402
 LEADS_PATH = ROOT / "output" / "leads.csv"
 INDEX_PATH = ROOT / "static" / "index.html"
@@ -287,6 +287,8 @@ def main():
     if host != "127.0.0.1" and not os.environ.get("APP_PASSWORD"):
         sys.exit("Refusing to listen on the network without APP_PASSWORD set.")
     sync_leads.restore(LEADS_PATH)  # restore the last backup, since a fresh host starts empty
+    if dedupe_by_phone(LEADS_PATH):  # clean up anything an overlapping run/restore duplicated
+        sync_leads.sync(LEADS_PATH)
     server = ThreadingHTTPServer((host, args.port), Handler)
     print(f"TrashLeadGen UI: http://{host}:{args.port}  (Ctrl+C to stop)", flush=True)
     try:

@@ -5,8 +5,8 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import lead_scraper
-from lead_scraper import (STATE_GROUPS, STATES, clean_email, element_to_row, is_complete, missing_fields,
-                           load_existing_phones, normalize_phone, run, website_offers_residential_pickup)
+from lead_scraper import (STATE_GROUPS, STATES, clean_email, dedupe_by_phone, element_to_row, is_complete,
+                           missing_fields, load_existing_phones, normalize_phone, run, website_offers_residential_pickup)
 
 
 class NormalizePhoneTests(unittest.TestCase):
@@ -257,6 +257,40 @@ class WebsiteResidentialPickupCheckTests(unittest.TestCase):
         html = "<html><body><p>Welcome to our company. Call us for a quote.</p></body></html>"
         with patch("lead_scraper.requests.get", return_value=MagicMock(text=html)):
             self.assertTrue(website_offers_residential_pickup("https://example.com"))
+
+
+class DedupeByPhoneTests(unittest.TestCase):
+    """Hit live: an overlapping scrape/restore around a redeploy left the same business duplicated
+    many times over (each instance restored its own snapshot, didn't see what the other wrote, and
+    both decided the business was "new"). This is the self-healing cleanup for that."""
+
+    def test_collapses_duplicate_phones_keeping_the_first(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "leads.csv"
+            with path.open("w", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=["company_name", "phone"])
+                writer.writeheader()
+                writer.writerow({"company_name": "Acme Waste", "phone": "555"})
+                writer.writerow({"company_name": "Other Co", "phone": "111"})
+                writer.writerow({"company_name": "Acme Waste", "phone": "555"})
+                writer.writerow({"company_name": "Acme Waste", "phone": "555"})
+            self.assertTrue(dedupe_by_phone(path))
+            with path.open() as f:
+                rows = list(csv.DictReader(f))
+        self.assertEqual([r["phone"] for r in rows], ["555", "111"])
+
+    def test_returns_false_when_there_is_nothing_to_collapse(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "leads.csv"
+            with path.open("w", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=["company_name", "phone"])
+                writer.writeheader()
+                writer.writerow({"company_name": "A", "phone": "111"})
+            self.assertFalse(dedupe_by_phone(path))
+
+    def test_returns_false_when_the_file_does_not_exist(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertFalse(dedupe_by_phone(Path(tmp) / "missing.csv"))
 
 
 if __name__ == "__main__":

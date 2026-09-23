@@ -281,6 +281,34 @@ def ensure_columns(path):
         writer.writerows(rows)
 
 
+def dedupe_by_phone(path):
+    """Collapse to one row per phone number (first occurrence wins). Multiple app instances/scrapes
+    can overlap around a redeploy (each restores its own snapshot from the backup, doesn't see the
+    other's writes, and both decide the same business is "new"), which can leave exact duplicate
+    rows behind -- this is the self-healing cleanup for that, safe to call any time. Returns whether
+    anything changed."""
+    if not path.exists():
+        return False
+    with path.open(newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        fieldnames = reader.fieldnames
+        rows = list(reader)
+    seen_phones, deduped = set(), []
+    for row in rows:
+        phone = row.get("phone")
+        if phone in seen_phones:
+            continue
+        seen_phones.add(phone)
+        deduped.append(row)
+    if len(deduped) == len(rows):
+        return False
+    with path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(deduped)
+    return True
+
+
 def _friendly_error(error):
     """A short, non-technical description of why a state's request failed, for the UI log --
     nobody using the web page needs to see a Python traceback or a raw HTTP error."""
@@ -341,6 +369,8 @@ def run(output_path, states):
     output_path.parent.mkdir(parents=True, exist_ok=True)
     sync_leads.restore(output_path)  # recover prior runs' data on a fresh (empty) host
     ensure_columns(output_path)
+    if dedupe_by_phone(output_path):  # clean up anything an overlapping run/restore duplicated
+        sync_leads.sync(output_path)
     seen = load_existing_phones(output_path)
     write_header = not output_path.exists() or output_path.stat().st_size == 0
     today = date.today().isoformat()
