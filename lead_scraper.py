@@ -71,7 +71,7 @@ BRAND_NAME = re.compile(BRAND_REGEX, re.I)
 # pet-waste scoopers.
 EXCLUDE_NAME = re.compile(
     r"water|sewer|sewage|septic|medical|biohazard|hazardous|hazmat|marine|boat|\bsupply\b|supplies|equipment|"
-    r"pest|plumb|landfill|transfer station|waste transfer|material recovery|"
+    r"pest|plumb|landfill|transfer station|waste transfer|material recovery|\bsolid waste\b|"
     r"recycling (center|facility|depot)|scrap|salvage|metal|mattress|"
     r"e-?waste|electronic|shred|portable|porta[- ]?(potty|john)|toilet|restroom|cleaning|janitor|"
     r"\b(city|town|village|county|township|state) of\b|\b(department|dept|division|bureau|commission|agency|"

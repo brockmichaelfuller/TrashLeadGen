@@ -129,7 +129,10 @@ class MoreTests(unittest.TestCase):
             self.assertIsNone(element_to_row({"type": "node", "id": 1, "tags": tags}, "CO", "x"), name)
 
     def test_municipal_solid_waste_divisions_are_excluded(self):
-        for name in ("Jefferson County Solid Waste Division", "Metro Solid Waste Bureau", "City Sanitation Commission"):
+        for name in ("Jefferson County Solid Waste Division", "Metro Solid Waste Bureau", "City Sanitation Commission",
+                     # Caught live: county-run programs that end right at "Solid Waste" -- no "of",
+                     # "department", "division" etc. to catch them, just the bare bureaucratic phrase.
+                     "Hertford County Solid Waste", "Avery County Solid Waste MRS"):
             tags = {"name": name, "phone": "303-343-7096"}
             self.assertIsNone(element_to_row({"type": "node", "id": 1, "tags": tags}, "CO", "x"), name)
 
