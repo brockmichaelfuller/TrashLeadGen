@@ -339,8 +339,19 @@ async function poll() {
   $("retryFailed").hidden = s.running || !failed.length;
   $("retryFailed").textContent = `Retry ${failed.length} failed state${failed.length === 1 ? "" : "s"} (${failed.join(", ")})`;
   $("retryFailed").dataset.states = JSON.stringify(failed);
-  if (s.running || wasRunning) await loadLeads();
-  wasRunning = s.running;
+  // Rebuilding the leads table wipes any text selection in it, which breaks copy/paste of a phone
+  // number, note, etc. right in the middle of a scrape (when this refresh fires every 2s). Skip the
+  // rebuild -- but keep updating progress above -- while the user has something selected; the next
+  // poll after they finish picks the refresh back up. wasRunning only flips to false once that final
+  // refresh actually happens, so finishing a scrape mid-selection doesn't strand the table stale.
+  if (s.running || wasRunning) {
+    if (!window.getSelection().toString()) {
+      await loadLeads();
+      wasRunning = s.running;
+    }
+  } else {
+    wasRunning = false;
+  }
 }
 
 // Clipboard API needs a secure context and can be silently blocked by browser settings; fall back
