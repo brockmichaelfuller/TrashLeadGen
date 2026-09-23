@@ -49,14 +49,16 @@ NAME_REGEX = "|".join(NAME_KEYWORDS)
 # using just that word are portable-toilet/porta-potty rental companies, not trash haulers, and
 # nothing in the name itself distinguishes the two.
 KEYWORD_NAME = re.compile(rf"\b({NAME_REGEX})s?\b", re.I)
-# Major national/regional residential haulers whose branch listings are often just the brand name,
-# with none of NAME_KEYWORDS in it (e.g. "Rumpke", "Republic Services") -- without this, they're
-# invisible to both the Overpass query and KEYWORD_NAME. Not exhaustive; smaller/regional haulers
-# still rely on NAME_KEYWORDS, so this list is worth extending as gaps are found.
+# Haulers whose listings are just the brand name, with none of NAME_KEYWORDS in it (e.g. "Rumpke",
+# "Republic Services") -- without this, they're invisible to both the Overpass query and
+# KEYWORD_NAME. Mostly major national/regional names, but also specific smaller haulers confirmed
+# by hand (e.g. "Curbie Sanitation" -- real residential curbside service, verified via their own
+# site, that "sanitation" alone no longer catches since that word alone is too often a porta-potty
+# company). Not exhaustive; extend as gaps are found.
 KNOWN_BRANDS = [
     "Republic Services", "Waste Management", "Waste Connections", "Rumpke", "Recology", "Burrtec",
     "Athens Services", "GFL Environmental", "Casella Waste", "Waste Pro", "WCA Waste",
-    "Advanced Disposal", "County Waste",
+    "Advanced Disposal", "County Waste", "Curbie Sanitation",
 ]
 BRAND_REGEX = "|".join(re.escape(b) for b in KNOWN_BRANDS)
 BRAND_NAME = re.compile(BRAND_REGEX, re.I)
@@ -69,17 +71,19 @@ BRAND_NAME = re.compile(BRAND_REGEX, re.I)
 # pet-waste scoopers.
 EXCLUDE_NAME = re.compile(
     r"water|sewer|sewage|septic|medical|biohazard|hazardous|hazmat|marine|boat|\bsupply\b|supplies|equipment|"
-    r"pest|plumb|landfill|transfer station|recycling (center|facility|depot)|scrap|salvage|metal|mattress|"
+    r"pest|plumb|landfill|transfer station|waste transfer|material recovery|"
+    r"recycling (center|facility|depot)|scrap|salvage|metal|mattress|"
     r"e-?waste|electronic|shred|portable|porta[- ]?(potty|john)|toilet|restroom|cleaning|janitor|"
     r"\b(city|town|village|county|township|state) of\b|\b(department|dept|division|bureau|commission|agency|"
     r"authority|public works|municipal|school|hospital|clinic|dental|veterinary)\b|\bfacility\b|"
-    r"drop[- ]?off|collection center|"
+    r"drop[- ]?off|collection center|convenience center|"
     r"dumpster|roll[- ]?off|\bjunk\b|\bbulk\b|construction|demolition|debris|industrial|"
     r"campus|sustainability|headquarters|corporate office|\bstore\b|\bshop\b|\bmarket\b|"
     r"treasures|antique|consignment|thrift|vintage|"
     r"\bmov(ing|ers)\b|relocation|"
     r"pet waste|dog waste|pooper|\bpoop\b|\bscoop|"
-    r"\btires?\b|textile",
+    r"\btires?\b|textile|"
+    r"\bcafe\b|\bcoffee\b|\broastery\b|\brestaurant\b|\bbakery\b",
     re.I,
 )
 EXCLUDE_MAN_MADE = {"wastewater_plant", "water_works", "water_tower", "storage_tank", "pumping_station"}
@@ -173,6 +177,9 @@ def element_to_row(element, state, today):
     is_named_match = KEYWORD_NAME.search(name) or BRAND_NAME.search(name)
     if not name or not is_named_match or EXCLUDE_NAME.search(name) or tags.get("man_made") in EXCLUDE_MAN_MADE:
         return None
+    website = (tags.get("website") or tags.get("contact:website") or "").strip()
+    if re.search(r"\.gov(/|$)", website, re.I):  # a government site regardless of what the name says
+        return None
     phone = next((normalize_phone(tags[k]) for k in PHONE_KEYS if k in tags), None)
     if not phone:
         return None
@@ -181,7 +188,7 @@ def element_to_row(element, state, today):
         "company_name": name,
         "phone": phone,
         "email": clean_email(tags.get("email") or tags.get("contact:email")),
-        "website": (tags.get("website") or tags.get("contact:website") or "").strip(),
+        "website": website,
         "address": " ".join(filter(None, [tags.get("addr:housenumber"), tags.get("addr:street")])),
         "city": (tags.get("addr:city") or "").strip(),
         "state": state,

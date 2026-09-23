@@ -104,7 +104,8 @@ class MoreTests(unittest.TestCase):
         # These are real national/regional haulers whose branch listings are often just the brand
         # name -- e.g. "Rumpke" has none of NAME_KEYWORDS in it, so without an explicit allowlist
         # they'd be silently invisible even though they're exactly who this tool should find.
-        for name in ("Rumpke", "Recology", "Republic Services", "Burrtec", "Athens Services", "GFL Environmental"):
+        for name in ("Rumpke", "Recology", "Republic Services", "Burrtec", "Athens Services", "GFL Environmental",
+                     "Curbie Sanitation"):
             tags = {"name": name, "phone": "303-343-7096"}
             self.assertIsNotNone(element_to_row({"type": "node", "id": 1, "tags": tags}, "CO", "x"), name)
 
@@ -136,6 +137,24 @@ class MoreTests(unittest.TestCase):
         for name in ("Acme Bulk Trash Pickup", "Metro Bulk Waste Removal", "City Bulk Item Collection"):
             tags = {"name": name, "phone": "303-343-7096"}
             self.assertIsNone(element_to_row({"type": "node", "id": 1, "tags": tags}, "CO", "x"), name)
+
+    def test_cafes_and_transfer_or_recovery_facilities_are_excluded(self):
+        # All caught live: a "No Waste" cafe/roastery, and a public materials-recovery/transfer
+        # facility whose OSM name didn't happen to say "facility" or "transfer station".
+        for name in ("No Waste Cafe & Roastery", "Downtown Waste Coffee Roasters",
+                     "Metro Solid Waste Transfer", "City Material Recovery & Solid Waste",
+                     "Neighborhood Recycling Convenience Center"):
+            tags = {"name": name, "phone": "303-343-7096"}
+            self.assertIsNone(element_to_row({"type": "node", "id": 1, "tags": tags}, "CO", "x"), name)
+
+    def test_a_dot_gov_website_is_excluded_regardless_of_name(self):
+        # Caught live: "Fayetteville Recycling & Trash Collection" (fayetteville-ar.gov) and "McKay
+        # Bay Scale House Waste Disposal" (tampa.gov) -- both municipal facilities whose plain name
+        # gave no indication they were government-run.
+        tags = {"name": "Acme Waste Collection", "phone": "303-343-7096", "website": "https://www.fayetteville-ar.gov/531/Recycling-Trash-Service"}
+        self.assertIsNone(element_to_row({"type": "node", "id": 1, "tags": tags}, "CO", "x"))
+        tags = {"name": "Acme Waste Services", "phone": "303-343-7096", "website": "https://acmewaste.com"}
+        self.assertIsNotNone(element_to_row({"type": "node", "id": 1, "tags": tags}, "CO", "x"))
 
 
 class ExistingPhonesTests(unittest.TestCase):
