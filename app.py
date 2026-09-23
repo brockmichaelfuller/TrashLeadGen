@@ -22,6 +22,7 @@ from urllib.parse import parse_qs
 ROOT = Path(__file__).parent
 sys.path.insert(0, str(ROOT))
 from lead_scraper import COLUMNS, STATE_GROUPS, missing_fields  # noqa: E402
+import sync_leads  # noqa: E402
 LEADS_PATH = ROOT / "output" / "leads.csv"
 INDEX_PATH = ROOT / "static" / "index.html"
 MAX_LOG_LINES = 500
@@ -215,6 +216,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json({"error": "phone and at least one of status/notes are required"}, 400)
             with lock:
                 ok = update_lead(LEADS_PATH, phone, updates)
+            if ok:
+                sync_leads.sync(LEADS_PATH)
             return self.send_json({"ok": True}) if ok else self.send_json({"error": "Lead not found"}, 404)
         self.send_json({"error": "Not found"}, 404)
 
@@ -228,6 +231,7 @@ def main():
     host = os.environ.get("HOST", "127.0.0.1")
     if host != "127.0.0.1" and not os.environ.get("APP_PASSWORD"):
         sys.exit("Refusing to listen on the network without APP_PASSWORD set.")
+    sync_leads.pull_github(LEADS_PATH)  # restore the last backup, since a fresh host starts empty
     server = ThreadingHTTPServer((host, args.port), Handler)
     print(f"TrashLeadGen UI: http://{host}:{args.port}  (Ctrl+C to stop)", flush=True)
     try:

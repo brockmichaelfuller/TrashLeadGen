@@ -36,7 +36,16 @@ Options:
 - **Complete vs partial.** A lead with a company name, phone, email and timezone is "complete". Leads missing any of those are kept but shown separately as "partial" (with what is missing). The page has a tab for each, and Download CSV exports the tab you are viewing.
 - **The company name must contain a hauling-related word** — waste, garbage, trash, sanitation, refuse, disposal, or rubbish (for example "Acme Waste Services" or "Southwest Sanitation"). Names with only a generic word like "Dumpsters" or "Hauling" are skipped, since those alone are as likely to be a dumpster-rental or moving company as a trash hauler.
 - Water and sewer utilities are filtered out by name. Some non-hauler noise (for example an appliance shop with "disposal" in its name) can still slip through, so review before use.
-- **`status` and `notes`** start blank and aren't set by the scraper. Once Thomas has reviewed the list and outreach begins, use the "Interested?" dropdown and Notes field on each row to record the outcome of a call — they save immediately, and both columns are included in the CSV export. On Render's free plan these are wiped along with everything else on redeploy/restart, since there's no persistent disk (see below).
+- **`status` and `notes`** start blank and aren't set by the scraper. Once Thomas has reviewed the list and outreach begins, use the "Interested?" dropdown and Notes field on each row to record the outcome of a call — they save immediately, and both columns are included in the CSV export.
+
+## Making data permanent on Render
+
+Render's free plan has no persistent disk: every redeploy, and every time the service spins back up after ~15 minutes idle, starts from an empty filesystem and loses whatever was scraped. `sync_leads.py` backs the CSV up externally so that doesn't lose data — it's a no-op with nothing configured, and each backend below is independently optional:
+
+- **GitHub** — commits `output/leads.csv` to this repo after every state and every edit, and restores the latest commit when the app starts on a fresh host. Set `GITHUB_TOKEN` (a personal access token with Contents read/write on this repo) and `GITHUB_REPO` (`owner/name`).
+- **Google Sheets** — overwrites a sheet with the current CSV after every state and every edit, via a Google service account. Set `GOOGLE_SERVICE_ACCOUNT_JSON` (the full service-account key JSON, as one string) and `GOOGLE_SHEET_ID` (from the sheet's URL, between `/d/` and `/edit`). Share the target sheet with the service account's `client_email` as an Editor first, or the writes will fail (silently — see the app's log).
+
+Both can be set at once. Neither is required for local use.
 
 ## Tests
 

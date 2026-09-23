@@ -18,6 +18,8 @@ import requests
 import socket
 import urllib3.util.connection as urllib3_connection
 
+import sync_leads
+
 # Force IPv4: Render's containers (and some other small hosts) have no outbound IPv6 route, but
 # these Overpass mirrors publish IPv6 addresses too. Left to its own devices, Python sometimes tries
 # the IPv6 address, fails with "Network is unreachable", and gives up instead of falling back to
@@ -209,6 +211,7 @@ def ensure_columns(path):
 
 def run(output_path, states):
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    sync_leads.pull_github(output_path)  # recover prior runs' data on a fresh (empty) host
     ensure_columns(output_path)
     seen = load_existing_phones(output_path)
     write_header = not output_path.exists() or output_path.stat().st_size == 0
@@ -236,6 +239,7 @@ def run(output_path, states):
                     writer.writerow(row)
                     new += 1
             out.flush()  # keep progress if the run is interrupted later
+            sync_leads.sync(output_path)  # and back it up, since a restart wipes the local disk
             total_new += new
             print(f"[{i + 1}/{len(states)}] {state}: {new} new companies")
             time.sleep(REQUEST_DELAY_SECONDS)
