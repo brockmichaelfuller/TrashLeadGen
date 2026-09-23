@@ -63,9 +63,10 @@ BRAND_NAME = re.compile(BRAND_REGEX, re.I)
 # Keep only private garbage/waste pickup companies: drop utilities, medical/hazardous waste, marine and
 # portable sanitation, landfills/transfer stations, scrap and recycling yards, equipment sellers, and
 # public agencies. Used by both scrapers and by clean_existing().
-# "Residential curb pickup" means an actual garbage-truck hauling company, not: dumpster rental /
-# roll-off / junk hauling, construction & demolition debris, corporate offices / sustainability
-# campuses, retail stores selling zero-waste products, moving companies, or pet-waste scoopers.
+# "Residential curb pickup" means normal weekly garbage-truck service, not: dumpster rental /
+# roll-off / junk hauling / bulk-item pickup, construction & demolition debris, corporate offices /
+# sustainability campuses, retail stores selling zero-waste products, moving companies, or
+# pet-waste scoopers.
 EXCLUDE_NAME = re.compile(
     r"water|sewer|sewage|septic|medical|biohazard|hazardous|hazmat|marine|boat|\bsupply\b|supplies|equipment|"
     r"pest|plumb|landfill|transfer station|recycling (center|facility|depot)|scrap|salvage|metal|mattress|"
@@ -73,7 +74,7 @@ EXCLUDE_NAME = re.compile(
     r"\b(city|town|village|county|township|state) of\b|\b(department|dept|division|bureau|commission|agency|"
     r"authority|public works|municipal|school|hospital|clinic|dental|veterinary)\b|\bfacility\b|"
     r"drop[- ]?off|collection center|"
-    r"dumpster|roll[- ]?off|\bjunk\b|construction|demolition|debris|industrial|"
+    r"dumpster|roll[- ]?off|\bjunk\b|\bbulk\b|construction|demolition|debris|industrial|"
     r"campus|sustainability|headquarters|corporate office|\bstore\b|\bshop\b|\bmarket\b|"
     r"treasures|antique|consignment|thrift|vintage|"
     r"\bmov(ing|ers)\b|relocation|"

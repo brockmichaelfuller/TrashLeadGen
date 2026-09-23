@@ -131,6 +131,12 @@ class MoreTests(unittest.TestCase):
             tags = {"name": name, "phone": "303-343-7096"}
             self.assertIsNone(element_to_row({"type": "node", "id": 1, "tags": tags}, "CO", "x"), name)
 
+    def test_bulk_trash_pickup_is_excluded(self):
+        # The site is for normal weekly residential service, not one-off bulk/large-item pickup.
+        for name in ("Acme Bulk Trash Pickup", "Metro Bulk Waste Removal", "City Bulk Item Collection"):
+            tags = {"name": name, "phone": "303-343-7096"}
+            self.assertIsNone(element_to_row({"type": "node", "id": 1, "tags": tags}, "CO", "x"), name)
+
 
 class ExistingPhonesTests(unittest.TestCase):
     def test_existing_rows_match_regardless_of_phone_format(self):
