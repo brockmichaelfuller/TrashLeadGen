@@ -191,7 +191,7 @@ def element_to_row(element, state, today):
 def fetch_elements(state_code):
     query = build_query(state_code)
     headers = {"User-Agent": USER_AGENT, "Accept": "application/json"}
-    last_error = None
+    errors = []  # one per attempt, so a failure shows what every mirror actually did, not just the last
     for attempt in range(MAX_ATTEMPTS):
         url = OVERPASS_URLS[attempt % len(OVERPASS_URLS)]
         try:
@@ -202,9 +202,9 @@ def fetch_elements(state_code):
                 raise RuntimeError(data["remark"])
             return data.get("elements", [])
         except (requests.RequestException, ValueError, RuntimeError) as error:
-            last_error = error
+            errors.append(f"{url}: {type(error).__name__}: {error}")
             time.sleep(REQUEST_DELAY_SECONDS * (attempt + 1))
-    raise RuntimeError(f"Overpass failed after {MAX_ATTEMPTS} attempts: {last_error}")
+    raise RuntimeError(f"Overpass failed after {MAX_ATTEMPTS} attempts:\n" + "\n".join(errors))
 
 
 def load_existing_phones(path):
