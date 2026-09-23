@@ -45,20 +45,35 @@ NAME_REGEX = "|".join(NAME_KEYWORDS)
 # don't match. The point isn't the word "waste" specifically -- it's that the business reads as a
 # residential trash hauler by name; EXCLUDE_NAME below is what actually narrows that down.
 KEYWORD_NAME = re.compile(rf"\b({NAME_REGEX})s?\b", re.I)
+# Major national/regional residential haulers whose branch listings are often just the brand name,
+# with none of NAME_KEYWORDS in it (e.g. "Rumpke", "Republic Services") -- without this, they're
+# invisible to both the Overpass query and KEYWORD_NAME. Not exhaustive; smaller/regional haulers
+# still rely on NAME_KEYWORDS, so this list is worth extending as gaps are found.
+KNOWN_BRANDS = [
+    "Republic Services", "Waste Management", "Waste Connections", "Rumpke", "Recology", "Burrtec",
+    "Athens Services", "GFL Environmental", "Casella Waste", "Waste Pro", "WCA Waste",
+    "Advanced Disposal", "County Waste",
+]
+BRAND_REGEX = "|".join(re.escape(b) for b in KNOWN_BRANDS)
+BRAND_NAME = re.compile(BRAND_REGEX, re.I)
 # Keep only private garbage/waste pickup companies: drop utilities, medical/hazardous waste, marine and
 # portable sanitation, landfills/transfer stations, scrap and recycling yards, equipment sellers, and
 # public agencies. Used by both scrapers and by clean_existing().
 # "Residential curb pickup" means an actual garbage-truck hauling company, not: dumpster rental /
 # roll-off / junk hauling, construction & demolition debris, corporate offices / sustainability
-# campuses, or retail stores selling zero-waste products.
+# campuses, retail stores selling zero-waste products, moving companies, or pet-waste scoopers.
 EXCLUDE_NAME = re.compile(
     r"water|sewer|sewage|septic|medical|biohazard|hazardous|hazmat|marine|boat|\bsupply\b|supplies|equipment|"
     r"pest|plumb|landfill|transfer station|recycling (center|facility|depot)|scrap|salvage|metal|mattress|"
     r"e-?waste|electronic|shred|portable|porta[- ]?(potty|john)|toilet|restroom|cleaning|janitor|"
-    r"\b(city|town|village|county|township|state) of\b|\b(department|dept|authority|public works|municipal|"
-    r"school|hospital|clinic|dental|veterinary)\b|\bfacility\b|drop[- ]?off|collection center|"
+    r"\b(city|town|village|county|township|state) of\b|\b(department|dept|division|bureau|commission|agency|"
+    r"authority|public works|municipal|school|hospital|clinic|dental|veterinary)\b|\bfacility\b|"
+    r"drop[- ]?off|collection center|"
     r"dumpster|roll[- ]?off|\bjunk\b|construction|demolition|debris|industrial|"
-    r"campus|sustainability|headquarters|corporate office|\bstore\b|\bshop\b|\bmarket\b",
+    r"campus|sustainability|headquarters|corporate office|\bstore\b|\bshop\b|\bmarket\b|"
+    r"treasures|antique|consignment|thrift|vintage|"
+    r"\bmov(ing|ers)\b|relocation|"
+    r"pet waste|dog waste|pooper|\bpoop\b|\bscoop",
     re.I,
 )
 EXCLUDE_MAN_MADE = {"wastewater_plant", "water_works", "water_tower", "storage_tank", "pumping_station"}
@@ -125,10 +140,13 @@ def timezone_label(state, lat=None, lon=None):
 def build_query(state_code):
     # Filtering on the indexed "phone" key first keeps this fast; scanning names alone or
     # adding "contact:phone" made Overpass time out. Phones are re-validated in Python.
+    # The name filter also needs to include KNOWN_BRANDS, or a branch listed under just its brand
+    # name (e.g. "Rumpke", with no generic keyword) never gets fetched from Overpass at all.
+    query_name_regex = f"{NAME_REGEX}|{BRAND_REGEX}"
     return (
         f"[out:json][timeout:{QUERY_TIMEOUT_SECONDS}];"
         f'area["ISO3166-2"="US-{state_code}"]->.state;'
-        f'nwr(area.state)["phone"]["name"~"{NAME_REGEX}",i];out center tags;'
+        f'nwr(area.state)["phone"]["name"~"{query_name_regex}",i];out center tags;'
     )
 
 
@@ -146,7 +164,8 @@ def normalize_phone(raw):
 def element_to_row(element, state, today):
     tags = element.get("tags", {})
     name = (tags.get("name") or "").strip()
-    if not name or not KEYWORD_NAME.search(name) or EXCLUDE_NAME.search(name) or tags.get("man_made") in EXCLUDE_MAN_MADE:
+    is_named_match = KEYWORD_NAME.search(name) or BRAND_NAME.search(name)
+    if not name or not is_named_match or EXCLUDE_NAME.search(name) or tags.get("man_made") in EXCLUDE_MAN_MADE:
         return None
     phone = next((normalize_phone(tags[k]) for k in PHONE_KEYS if k in tags), None)
     if not phone:
@@ -209,9 +228,22 @@ def ensure_columns(path):
         writer.writerows(rows)
 
 
+def _friendly_error(error):
+    """A short, non-technical description of why a state's request failed, for the UI log --
+    nobody using the web page needs to see a Python traceback or a raw HTTP error."""
+    text = str(error).lower()
+    if "timeout" in text or "timed out" in text:
+        return "the map data source took too long to respond"
+    if "runtime error" in text:
+        return "the map data source was too busy to finish this search"
+    if any(s in text for s in ("network is unreachable", "connection refused", "newconnectionerror", "connectionerror")):
+        return "couldn't connect to the map data source"
+    return "the map data source had a temporary problem"
+
+
 def run(output_path, states):
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    sync_leads.pull_github(output_path)  # recover prior runs' data on a fresh (empty) host
+    sync_leads.restore(output_path)  # recover prior runs' data on a fresh (empty) host
     ensure_columns(output_path)
     seen = load_existing_phones(output_path)
     write_header = not output_path.exists() or output_path.stat().st_size == 0
@@ -228,7 +260,7 @@ def run(output_path, states):
             try:
                 elements = fetch_elements(state)
             except Exception as error:  # one bad state must not stop the run
-                print(f"[{i + 1}/{len(states)}] {state}: FAILED ({error})", file=sys.stderr)
+                print(f"[{i + 1}/{len(states)}] {state}: skipped -- {_friendly_error(error)}", file=sys.stderr)
                 failed.append(state)
                 continue
             new = 0

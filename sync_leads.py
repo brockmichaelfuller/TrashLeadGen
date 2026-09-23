@@ -111,7 +111,41 @@ def push_sheets(local_path):
         _warn("Google Sheets push", error)
 
 
+def pull_sheets(local_path):
+    """Overwrite local_path with whatever's currently in the configured sheet."""
+    sheet_id = os.environ.get("GOOGLE_SHEET_ID")
+    session = _sheets_session_or_none()
+    if not sheet_id or session is None:
+        return
+    try:
+        response = session.get(
+            f"https://sheets.googleapis.com/v4/spreadsheets/{sheet_id}/values/A1:Z100000", timeout=15)
+        if response.status_code != 200:
+            _warn("Google Sheets pull", f"HTTP {response.status_code}: {response.text[:200]}")
+            return
+        rows = response.json().get("values", [])
+        if not rows:
+            return
+        local_path.parent.mkdir(parents=True, exist_ok=True)
+        with local_path.open("w", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            width = len(rows[0])
+            for row in rows:
+                writer.writerow(row + [""] * (width - len(row)))  # Sheets drops trailing blank cells
+    except requests.RequestException as error:
+        _warn("Google Sheets pull", error)
+
+
 def sync(local_path):
     """Back up local_path everywhere that's configured. Safe to call after every change."""
     push_github(local_path)
     push_sheets(local_path)
+
+
+def restore(local_path):
+    """Recover the last backup onto a fresh host. Tries GitHub first, then Sheets, then gives up
+    quietly and leaves local_path as it is (an empty/missing file is normal on a first-ever run)."""
+    pull_github(local_path)
+    if local_path.exists() and local_path.stat().st_size > 0:
+        return
+    pull_sheets(local_path)

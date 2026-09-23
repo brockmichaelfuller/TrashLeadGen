@@ -59,11 +59,16 @@
   @keyframes flash { from { background: rgba(31, 138, 91, .28); } to { background: transparent; } }
   table { width: 100%; border-collapse: collapse; }
   th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line); white-space: nowrap; }
-  td:first-child { white-space: normal; min-width: 180px; }
-  td:nth-child(3), td:nth-child(4) { white-space: normal; overflow-wrap: anywhere; min-width: 200px; }  /* full email / website, wrapped */
-  td.interested select { min-width: 130px; }
-  td.notes { min-width: 220px; }
+  td:first-child, th:first-child { white-space: normal; min-width: 180px; position: sticky; left: 0; background: var(--panel); z-index: 1; }
+  tbody tr:hover td:first-child { background: var(--row); }
+  td:nth-child(5), td:nth-child(6) { white-space: normal; overflow-wrap: anywhere; min-width: 200px; }  /* full email / website, wrapped */
+  td.interested select { min-width: 140px; }
+  td.notes { min-width: 240px; }
   td.notes input { min-width: 200px; }
+  .cellwrap { display: flex; align-items: center; gap: 6px; }
+  .saved-tag { color: var(--accent); font-size: 11px; font-weight: 600; opacity: 0; transition: opacity .25s; white-space: nowrap; }
+  .saved-tag.show { opacity: 1; }
+  tr.excluded { opacity: .5; }
   th { color: var(--muted); font-weight: 600; font-size: 12px; cursor: pointer; user-select: none; }
   th:hover { color: var(--text); }
   tbody tr:hover { background: var(--row); }
@@ -126,14 +131,17 @@
     <div class="scroll">
       <table>
         <thead><tr>
-          <th data-k="company_name">Company</th><th data-k="phone">Phone</th><th data-k="email">Email</th><th data-k="website">Website</th><th data-k="address">Address</th><th data-k="city">City</th>
+          <th data-k="company_name">Company</th><th data-k="phone">Phone</th>
+          <th data-k="status">Interested?</th><th>Notes</th>
+          <th data-k="email">Email</th><th data-k="website">Website</th><th data-k="address">Address</th><th data-k="city">City</th>
           <th data-k="state">State</th><th data-k="timezone">Timezone</th><th data-k="date_collected">Collected</th><th data-k="missing" id="missingTh" hidden>Missing</th>
-          <th data-k="status">Interested?</th><th>Notes</th><th data-k="source">Source</th>
+          <th data-k="source">Source</th>
         </tr></thead>
         <tbody id="rows"></tbody>
       </table>
     </div>
     <div class="empty" id="empty" hidden>No leads yet. Click Run scrape to collect them.</div>
+    <div class="note">Dimmed rows are marked "Not interested" or "Do not contact" — they stay here for the record but are left out of Copy phones/emails and Download CSV.</div>
     <div class="note">Research list only. Do not call or text anyone until Thomas has reviewed it (TCPA / do-not-call rules apply).</div>
   </section>
 </main>
@@ -146,41 +154,91 @@ const api = (url, body) => fetch(url, body === undefined ? {} : {
   method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body)
 }).then(async r => { const j = await r.json(); if (!r.ok) throw new Error(j.error || "Request failed"); return j; });
 
+// Only the field that actually changed is ever sent -- never both status and notes together --
+// so one teammate changing a status can't clobber another teammate's just-saved note (the backend
+// only touches the fields present in the request body).
 async function saveLead(phone, updates) {
-  try { await api("/api/lead", { phone, ...updates }); }
-  catch (e) { $("err").textContent = e.message; }
+  await api("/api/lead", { phone, ...updates });
 }
+
+function debounce(fn, ms) {
+  let t = null;
+  const wrapped = () => { clearTimeout(t); t = setTimeout(() => { t = null; fn(); }, ms); };
+  wrapped.flush = () => { if (t) { clearTimeout(t); t = null; fn(); } };
+  return wrapped;
+}
+
+function savedTag() {
+  const span = document.createElement("span");
+  span.className = "saved-tag";
+  span.textContent = "Saved";
+  return span;
+}
+
+function flashSaved(tag) {
+  tag.classList.add("show");
+  clearTimeout(tag._hideTimer);
+  tag._hideTimer = setTimeout(() => tag.classList.remove("show"), 1500);
+}
+
+const DO_NOT_EXPORT = new Set(["Not interested", "Do not contact"]);
 
 function statusCell(l) {
   const td = document.createElement("td");
   td.className = "interested";
+  const wrap = document.createElement("div");
+  wrap.className = "cellwrap";
   const sel = document.createElement("select");
-  for (const [value, label] of [["", "—"], ["Interested", "Interested"], ["Not interested", "Not interested"]]) {
+  for (const [value, label] of [["", "—"], ["Interested", "Interested"], ["Not interested", "Not interested"], ["Do not contact", "Do not contact"]]) {
     sel.append(new Option(label, value));
   }
   sel.value = l.status || "";
-  sel.onchange = () => { l.status = sel.value; saveLead(l.phone, { status: sel.value, notes: l.notes || "" }); };
-  td.append(sel);
+  const tag = savedTag();
+  sel.onchange = async () => {
+    l.status = sel.value;
+    try { await saveLead(l.phone, { status: sel.value }); flashSaved(tag); renderLeads(); }
+    catch (e) { $("err").textContent = e.message; }
+  };
+  wrap.append(sel, tag);
+  td.append(wrap);
   return td;
 }
 
 function notesCell(l) {
   const td = document.createElement("td");
   td.className = "notes";
+  const wrap = document.createElement("div");
+  wrap.className = "cellwrap";
   const inp = document.createElement("input");
   inp.type = "text";
+  inp.className = "notes-input";
   inp.placeholder = "What happened when we called…";
   inp.value = l.notes || "";
-  inp.onblur = () => {
-    if (inp.value === (l.notes || "")) return;
-    l.notes = inp.value;
-    saveLead(l.phone, { status: l.status || "", notes: inp.value });
-  };
-  td.append(inp);
+  const tag = savedTag();
+  const doSave = debounce(async () => {
+    try { await saveLead(l.phone, { notes: inp.value }); flashSaved(tag); }
+    catch (e) { $("err").textContent = e.message; }
+  }, 600);
+  // Saves as you type (debounced so it's not a request per keystroke), and immediately on blur so
+  // clicking away right after typing doesn't lose the last half-second of edits.
+  inp.oninput = () => { l.notes = inp.value; doSave(); };
+  inp.onblur = () => doSave.flush();
+  wrap.append(inp, tag);
+  td.append(wrap);
   return td;
 }
 
 function renderLeads() {
+  // A note mid-typing (or the notes/status of the row it belongs to) must survive this rebuild --
+  // a poll during an active scrape calls this every couple seconds, and losing focus or cursor
+  // position out from under someone typing is exactly the "yanked out from under you" complaint.
+  const active = document.activeElement;
+  let refocus = null;
+  if (active && active.classList.contains("notes-input")) {
+    const tr = active.closest("tr");
+    if (tr) refocus = { phone: tr.dataset.phone, start: active.selectionStart, end: active.selectionEnd };
+  }
+
   const q = $("search").value.trim().toLowerCase(), st = $("stateFilter").value;
   const inTab = leads.filter(l => (tab === "complete") === l.complete);
   const shown = inTab.filter(l => (!st || l.state === st) &&
@@ -191,13 +249,21 @@ function renderLeads() {
   const fresh = seenSources ? new Set(shown.filter(l => !seenSources.has(l.source + l.phone)).map(l => l.source + l.phone)) : new Set();
   $("rows").replaceChildren(...shown.map(l => {
     const tr = document.createElement("tr");
+    tr.dataset.phone = l.phone;
     if (fresh.has(l.source + l.phone)) tr.className = "new";
-    for (const k of ["company_name", "phone", "email", "website", "address", "city", "state", "timezone", "date_collected", ...(tab === "partial" ? ["missing"] : [])]) {
+    if (DO_NOT_EXPORT.has(l.status)) tr.classList.add("excluded");
+    const company = document.createElement("td");
+    company.textContent = l.company_name || "";
+    tr.append(company);
+    const phone = document.createElement("td");
+    phone.textContent = l.phone || "";
+    tr.append(phone);
+    tr.append(statusCell(l), notesCell(l));
+    for (const k of ["email", "website", "address", "city", "state", "timezone", "date_collected", ...(tab === "partial" ? ["missing"] : [])]) {
       const td = document.createElement("td");
       td.textContent = l[k] || "";
       tr.append(td);
     }
-    tr.append(statusCell(l), notesCell(l));
     const src = document.createElement("td");
     src.textContent = l.source || "";
     src.className = "src";
@@ -205,6 +271,12 @@ function renderLeads() {
     return tr;
   }));
   seenSources = new Set(leads.map(l => l.source + l.phone));
+
+  if (refocus) {
+    const tr = [...$("rows").children].find(row => row.dataset.phone === refocus.phone);
+    const inp = tr && tr.querySelector(".notes-input");
+    if (inp) { inp.focus(); inp.setSelectionRange(refocus.start, refocus.end); }
+  }
   $("cntComplete").textContent = leads.filter(l => l.complete).length;
   $("cntPartial").textContent = leads.filter(l => !l.complete).length;
   $("tabComplete").classList.toggle("active", tab === "complete");
@@ -233,21 +305,37 @@ async function loadGroups() {
   for (const g of groups) $("scope").append(new Option(`Group ${g.id}: ${g.label}`, g.id));
 }
 
+// How far through the current run we are, from the scraper's own "[3/13] CO: ..." progress lines
+// -- so the bar actually fills in as states finish instead of jumping to 100% the instant it starts.
+function progressFraction(log) {
+  for (let i = log.length - 1; i >= 0; i--) {
+    const m = log[i].match(/^\[(\d+)\/(\d+)\]/);
+    if (m) return Math.min(1, Number(m[1]) / Number(m[2]));
+  }
+  return 0;
+}
+
 async function poll() {
   const s = await api("/api/status");
   $("progressCard").hidden = !s.started;
   $("run").disabled = s.running;
   $("stop").hidden = !s.running;
+  const failed = s.failedStates || [];
   if (s.started) {
     const scope = s.scope || "the entire U.S.";
-    $("progressText").textContent = s.running ? `Scraping ${scope}…` : s.failed ? "Scrape failed — see log" : `Finished scraping ${scope}`;
-    $("barFill").style.width = s.running ? "100%" : s.failed ? "0%" : "100%";
-    $("barFill").style.opacity = s.running ? .5 : 1;
+    let text;
+    if (s.running) text = `Scraping ${scope}…`;
+    else if (s.failed) text = "Something went wrong and the scrape didn't finish. You can try running it again.";
+    else if (failed.length) text = `Finished scraping ${scope} — ${failed.length} area${failed.length === 1 ? "" : "s"} couldn't be reached. Use Retry below.`;
+    else text = `Finished scraping ${scope}.`;
+    $("progressText").textContent = text;
+    const frac = s.running ? Math.max(0.06, progressFraction(s.log)) : (s.failed ? 0 : 1);
+    $("barFill").style.width = `${frac * 100}%`;
+    $("barFill").style.opacity = s.running ? .7 : 1;
     const log = $("log"), atEnd = log.scrollTop + log.clientHeight >= log.scrollHeight - 20;
     log.textContent = s.log.join("\n");
     if (atEnd) log.scrollTop = log.scrollHeight;
   }
-  const failed = s.failedStates || [];
   $("retryFailed").hidden = s.running || !failed.length;
   $("retryFailed").textContent = `Retry ${failed.length} failed state${failed.length === 1 ? "" : "s"} (${failed.join(", ")})`;
   $("retryFailed").dataset.states = JSON.stringify(failed);
@@ -294,15 +382,18 @@ $("retryFailed").onclick = async () => {
   catch (e) { $("err").textContent = e.message; }
 };
 
+// "Not interested" and "Do not contact" leads stay visible in the table (for the record) but are
+// left out of every copy/export action, same as the server-side CSV export.
 $("copyEmails").onclick = async () => {
-  const ok = await copyText(renderLeads().map(l => l.email).filter(Boolean).join("\n"));
+  const emails = renderLeads().filter(l => !DO_NOT_EXPORT.has(l.status)).map(l => l.email).filter(Boolean);
+  const ok = await copyText(emails.join("\n"));
   $("copyEmails").textContent = ok ? "Copied!" : "See prompt";
   setTimeout(() => $("copyEmails").textContent = "Copy emails", 1200);
 };
 
 $("copy").onclick = async () => {
-  const phones = renderLeads().map(l => l.phone).join("\n");
-  const ok = await copyText(phones);
+  const phones = renderLeads().filter(l => !DO_NOT_EXPORT.has(l.status)).map(l => l.phone);
+  const ok = await copyText(phones.join("\n"));
   $("copy").textContent = ok ? "Copied!" : "See prompt";
   setTimeout(() => $("copy").textContent = "Copy phones", 1200);
 };

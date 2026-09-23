@@ -127,6 +127,49 @@ class SheetsEnabledTests(unittest.TestCase):
         sent_values = mock_session.put.call_args.kwargs["json"]["values"]
         self.assertEqual(sent_values, [["company_name", "phone"], ["Acme Waste", "(555) 123-4567"]])
 
+    @patch.dict("os.environ", {"GOOGLE_SHEET_ID": "sheet123", "GOOGLE_SERVICE_ACCOUNT_JSON": "x"}, clear=True)
+    @patch("sync_leads._sheets_session_or_none")
+    def test_pull_writes_rows_and_pads_ragged_ones(self, mock_session_fn):
+        mock_session = MagicMock()
+        mock_session.get.return_value = MagicMock(
+            status_code=200,
+            json=lambda: {"values": [["company_name", "phone", "notes"], ["Acme", "555"]]})  # Sheets drops trailing blanks
+        mock_session_fn.return_value = mock_session
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "leads.csv"
+            sync_leads.pull_sheets(path)
+            with path.open() as f:
+                rows = list(csv.reader(f))
+        self.assertEqual(rows, [["company_name", "phone", "notes"], ["Acme", "555", ""]])
+
+
+class RestoreTests(unittest.TestCase):
+    def setUp(self):
+        sync_leads._sheets_session = None
+        sync_leads._sheets_session_tried = False
+
+    def tearDown(self):
+        sync_leads._sheets_session = None
+        sync_leads._sheets_session_tried = False
+
+    @patch("sync_leads.pull_sheets")
+    @patch("sync_leads.pull_github")
+    def test_falls_back_to_sheets_when_github_yields_nothing(self, mock_pull_github, mock_pull_sheets):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "leads.csv"  # pull_github is mocked to a no-op, so this stays missing
+            sync_leads.restore(path)
+        mock_pull_github.assert_called_once_with(path)
+        mock_pull_sheets.assert_called_once_with(path)
+
+    @patch("sync_leads.pull_sheets")
+    @patch("sync_leads.pull_github")
+    def test_skips_sheets_when_github_already_restored_data(self, mock_pull_github, mock_pull_sheets):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "leads.csv"
+            mock_pull_github.side_effect = lambda p: p.write_text("company_name,phone\nA,555\n")
+            sync_leads.restore(path)
+        mock_pull_sheets.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

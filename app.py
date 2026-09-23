@@ -71,11 +71,18 @@ def update_lead(path, phone, updates):
     return True
 
 
+# Leads marked with either of these are kept in the UI (for the record) but left out of every
+# export and copy action, so a "do not contact" or declined lead can't accidentally get dialed.
+DO_NOT_EXPORT_STATUSES = {"Not interested", "Do not contact"}
+
+
 def export_csv(path, which="all"):
     out = io.StringIO()
     writer = csv.DictWriter(out, fieldnames=COLUMNS, extrasaction="ignore", restval="")
     writer.writeheader()
     for row in read_csv(path):
+        if row.get("status") in DO_NOT_EXPORT_STATUSES:
+            continue
         if which == "all" or (which == "complete") == row["complete"]:
             writer.writerow(row)
     return out.getvalue().encode()
@@ -231,7 +238,7 @@ def main():
     host = os.environ.get("HOST", "127.0.0.1")
     if host != "127.0.0.1" and not os.environ.get("APP_PASSWORD"):
         sys.exit("Refusing to listen on the network without APP_PASSWORD set.")
-    sync_leads.pull_github(LEADS_PATH)  # restore the last backup, since a fresh host starts empty
+    sync_leads.restore(LEADS_PATH)  # restore the last backup, since a fresh host starts empty
     server = ThreadingHTTPServer((host, args.port), Handler)
     print(f"TrashLeadGen UI: http://{host}:{args.port}  (Ctrl+C to stop)", flush=True)
     try:

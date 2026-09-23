@@ -89,6 +89,30 @@ class MoreTests(unittest.TestCase):
             tags = {"name": name, "phone": "303-343-7096"}
             self.assertIsNotNone(element_to_row({"type": "node", "id": 1, "tags": tags}, "CO", "x"), name)
 
+    def test_known_brands_are_kept_even_without_a_keyword(self):
+        # These are real national/regional haulers whose branch listings are often just the brand
+        # name -- e.g. "Rumpke" has none of NAME_KEYWORDS in it, so without an explicit allowlist
+        # they'd be silently invisible even though they're exactly who this tool should find.
+        for name in ("Rumpke", "Recology", "Republic Services", "Burrtec", "Athens Services", "GFL Environmental"):
+            tags = {"name": name, "phone": "303-343-7096"}
+            self.assertIsNotNone(element_to_row({"type": "node", "id": 1, "tags": tags}, "CO", "x"), name)
+
+    def test_moving_companies_and_pet_waste_scoopers_are_excluded(self):
+        for name in ("Acme Movers & Waste Hauling", "XYZ Moving & Trash Removal", "Speedy Relocation Waste Services",
+                     "Scoopy Doo Pet Waste Removal", "Doody Duty Dog Waste Service", "Pooper Scooper Waste Co"):
+            tags = {"name": name, "phone": "303-343-7096"}
+            self.assertIsNone(element_to_row({"type": "node", "id": 1, "tags": tags}, "CO", "x"), name)
+
+    def test_thrift_and_antique_stores_using_trash_in_the_name_are_excluded(self):
+        for name in ("Trash & Treasures", "Trash to Treasure Antiques", "Vintage Trash Consignment"):
+            tags = {"name": name, "phone": "303-343-7096"}
+            self.assertIsNone(element_to_row({"type": "node", "id": 1, "tags": tags}, "CO", "x"), name)
+
+    def test_municipal_solid_waste_divisions_are_excluded(self):
+        for name in ("Jefferson County Solid Waste Division", "Metro Solid Waste Bureau", "City Sanitation Commission"):
+            tags = {"name": name, "phone": "303-343-7096"}
+            self.assertIsNone(element_to_row({"type": "node", "id": 1, "tags": tags}, "CO", "x"), name)
+
 
 class ExistingPhonesTests(unittest.TestCase):
     def test_existing_rows_match_regardless_of_phone_format(self):
