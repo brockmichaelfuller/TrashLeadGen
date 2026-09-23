@@ -31,6 +31,25 @@ class ParseFailedStatesTests(unittest.TestCase):
         log = ["[1/2] AL: skipped -- couldn't connect to the map data source"] * 2
         self.assertEqual(parse_failed_states(log), ["AL"])
 
+    def test_a_state_that_recovers_on_automatic_retry_is_not_left_as_failed(self):
+        log = [
+            "[1/2] CO: skipped -- couldn't connect to the map data source",
+            "[2/2] WY: 1 new companies",
+            "1 state(s) had a temporary problem -- retrying automatically in 30s: CO",
+            "retry succeeded: CO: 0 new companies",
+            "Done. 1 new rows -> output/leads.csv (2 total unique phones)",
+        ]
+        self.assertEqual(parse_failed_states(log), [])
+
+    def test_a_state_that_fails_every_retry_round_still_shows_as_failed(self):
+        log = [
+            "[1/1] CO: skipped -- couldn't connect to the map data source",
+            "1 state(s) had a temporary problem -- retrying automatically in 30s: CO",
+            "still failing after retry: CO: skipped -- couldn't connect to the map data source",
+            "Failed states (rerun to retry): CO",
+        ]
+        self.assertEqual(parse_failed_states(log), ["CO"])
+
 
 if __name__ == "__main__":
     unittest.main()

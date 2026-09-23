@@ -102,21 +102,29 @@ def pump_output(proc):
     proc.wait()
 
 
-# Matches lead_scraper.py's per-state failure line, e.g. "[3/13] CO: skipped -- couldn't connect...".
-SKIPPED_STATE_RE = re.compile(r"^\[\d+/\d+\] (\S+): skipped\b")
+# Matches every per-state outcome line lead_scraper.py prints, across both its first pass
+# ("[3/13] CO: ...") and its automatic retry rounds ("retry succeeded: CO: ..." / "still failing
+# after retry: CO: ..."), capturing the state and whether that line was a skip or a success.
+STATE_OUTCOME_RE = re.compile(
+    r"^(?:\[\d+/\d+\]|retry succeeded:|still failing after retry:) (\S+): (skipped\b|\d)")
 
 
 def parse_failed_states(log_lines):
-    """States lead_scraper.py skipped this run, read straight from its per-state log lines as they're
-    printed -- not just from its end-of-run summary, so a run that crashes or gets killed partway
-    through (before reaching that summary) still leaves every skipped state retryable."""
-    seen, result = set(), []
+    """States lead_scraper.py currently considers failed, read straight from its per-state log lines
+    as they're printed -- not just from its end-of-run summary, so a run that crashes or gets killed
+    partway through (before reaching that summary) still leaves every skipped state retryable. Since
+    a state can fail its first pass and then succeed on an automatic retry, this tracks each state's
+    *most recent* outcome rather than just collecting every state ever mentioned as skipped."""
+    order, failed = [], {}
     for line in log_lines:
-        match = SKIPPED_STATE_RE.match(line)
-        if match and match.group(1) not in seen:
-            seen.add(match.group(1))
-            result.append(match.group(1))
-    return result
+        match = STATE_OUTCOME_RE.match(line)
+        if not match:
+            continue
+        state, outcome = match.group(1), match.group(2) == "skipped"
+        if state not in failed:
+            order.append(state)
+        failed[state] = outcome
+    return [state for state in order if failed[state]]
 
 
 def start_run(group_id="all", explicit_states=None):

@@ -171,14 +171,29 @@ class RunResilienceTests(unittest.TestCase):
         }
         with tempfile.TemporaryDirectory() as tmp:
             output_path = Path(tmp) / "leads.csv"
+            # CO's backup sync blows up on round 1, then succeeds on the automatic retry round; WY
+            # is fine throughout.
             with patch("lead_scraper.fetch_elements", side_effect=lambda state: elements[state]), \
                  patch.object(lead_scraper.sync_leads, "restore"), \
-                 patch.object(lead_scraper.sync_leads, "sync", side_effect=[RuntimeError("simulated backup failure"), None]), \
+                 patch.object(lead_scraper.sync_leads, "sync",
+                               side_effect=[RuntimeError("simulated backup failure"), None, None]), \
                  patch("lead_scraper.time.sleep"):
-                run(output_path, ["CO", "WY"])  # must not raise, even though CO's backup sync blows up
+                run(output_path, ["CO", "WY"])  # must not raise
             with output_path.open() as f:
                 rows = list(csv.DictReader(f))
         self.assertEqual({r["company_name"] for r in rows}, {"Acme Waste", "Rocky Mountain Waste"})
+
+    def test_a_state_that_fails_every_round_ends_up_in_the_final_failed_summary(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output_path = Path(tmp) / "leads.csv"
+            with patch("lead_scraper.fetch_elements", side_effect=RuntimeError("still down")), \
+                 patch.object(lead_scraper.sync_leads, "restore"), \
+                 patch.object(lead_scraper.sync_leads, "sync"), \
+                 patch("lead_scraper.time.sleep"), \
+                 patch("builtins.print") as mock_print:
+                run(output_path, ["CO"])
+        summary_lines = [c.args[0] for c in mock_print.call_args_list if c.args]
+        self.assertTrue(any("Failed states (rerun to retry): CO" in line for line in summary_lines), summary_lines)
 
 
 if __name__ == "__main__":

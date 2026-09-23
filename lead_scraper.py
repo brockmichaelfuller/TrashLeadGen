@@ -257,6 +257,35 @@ def log_debug_detail(output_path, state, error):
         pass  # debug logging must never itself break a run
 
 
+# A state that still fails after MAX_ATTEMPTS mirror cycles usually isn't broken -- Overpass is a
+# free, best-effort public service and individual mirrors have brief outages/rate limits that
+# typically clear within a minute or two. Automatically give the whole batch of failures one more
+# pass after a cooldown, instead of leaving that to a person clicking Retry every time.
+RETRY_ROUNDS = 2  # the initial pass, plus this many additional automatic passes over failures
+RETRY_ROUND_DELAY_SECONDS = 30
+
+
+def _attempt_state(state, writer, out, output_path, seen, today):
+    """Fetch, write, and back up one state. Returns (new_count, error); error is None on success.
+    Everything is inside one try, so a failure anywhere in it -- not just the network call -- can
+    never kill the whole run; worst case this one state comes back as a failure to retry."""
+    try:
+        seen.update(load_existing_phones(output_path))  # pick up rows another scraper added meanwhile
+        elements = fetch_elements(state)
+        new = 0
+        for element in elements:
+            row = element_to_row(element, state, today)
+            if row and row["phone"] not in seen:
+                seen.add(row["phone"])
+                writer.writerow(row)
+                new += 1
+        out.flush()  # keep progress if the run is interrupted later
+        sync_leads.sync(output_path)  # and back it up, since a restart wipes the local disk
+        return new, None
+    except Exception as error:  # one bad state must not stop the run
+        return 0, error
+
+
 def run(output_path, states):
     output_path.parent.mkdir(parents=True, exist_ok=True)
     sync_leads.restore(output_path)  # recover prior runs' data on a fresh (empty) host
@@ -264,42 +293,39 @@ def run(output_path, states):
     seen = load_existing_phones(output_path)
     write_header = not output_path.exists() or output_path.stat().st_size == 0
     today = date.today().isoformat()
-    failed = []
     total_new = 0
 
     with output_path.open("a", newline="", encoding="utf-8") as out:
         writer = csv.DictWriter(out, fieldnames=COLUMNS)
         if write_header:
             writer.writeheader()
-        for i, state in enumerate(states):
-            # Everything for this state -- fetching, writing, and backing up -- is inside one try, so
-            # a failure anywhere in it (not just the network call) can never kill the whole run. It
-            # used to wrap only fetch_elements(); a failure past that point (writing the row, the
-            # backup sync) would crash the process outright instead of just skipping the state.
-            try:
-                seen |= load_existing_phones(output_path)  # pick up rows another scraper added meanwhile
-                elements = fetch_elements(state)
-                new = 0
-                for element in elements:
-                    row = element_to_row(element, state, today)
-                    if row and row["phone"] not in seen:
-                        seen.add(row["phone"])
-                        writer.writerow(row)
-                        new += 1
-                out.flush()  # keep progress if the run is interrupted later
-                sync_leads.sync(output_path)  # and back it up, since a restart wipes the local disk
-                total_new += new
-                print(f"[{i + 1}/{len(states)}] {state}: {new} new companies")
-            except Exception as error:  # one bad state must not stop the run
-                message = _friendly_error(error)
-                print(f"[{i + 1}/{len(states)}] {state}: skipped -- {message}", file=sys.stderr)
-                log_debug_detail(output_path, state, error)  # the real exception, for /api/debug.log --
-                failed.append(state)                          # never shown in the user-facing log/UI
-            time.sleep(REQUEST_DELAY_SECONDS)
+
+        remaining = list(states)
+        for round_num in range(1, RETRY_ROUNDS + 1):
+            still_failing = []
+            for i, state in enumerate(remaining):
+                new, error = _attempt_state(state, writer, out, output_path, seen, today)
+                if error is None:
+                    total_new += new
+                    label = f"[{i + 1}/{len(remaining)}]" if round_num == 1 else "retry succeeded:"
+                    print(f"{label} {state}: {new} new companies")
+                else:
+                    message = _friendly_error(error)
+                    label = f"[{i + 1}/{len(remaining)}]" if round_num == 1 else "still failing after retry:"
+                    print(f"{label} {state}: skipped -- {message}", file=sys.stderr)
+                    log_debug_detail(output_path, state, error)  # the real exception, for /api/debug.log
+                    still_failing.append(state)                  # -- never shown in the user-facing log
+                time.sleep(REQUEST_DELAY_SECONDS)
+            remaining = still_failing
+            if not remaining or round_num == RETRY_ROUNDS:
+                break
+            print(f"{len(remaining)} state(s) had a temporary problem -- retrying automatically "
+                  f"in {RETRY_ROUND_DELAY_SECONDS}s: {', '.join(remaining)}")
+            time.sleep(RETRY_ROUND_DELAY_SECONDS)
 
     print(f"Done. {total_new} new rows -> {output_path} ({len(seen)} total unique phones)")
-    if failed:
-        print(f"Failed states (rerun to retry): {', '.join(failed)}", file=sys.stderr)
+    if remaining:
+        print(f"Failed states (rerun to retry): {', '.join(remaining)}", file=sys.stderr)
 
 
 def main():
