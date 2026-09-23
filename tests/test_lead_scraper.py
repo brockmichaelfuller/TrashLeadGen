@@ -64,12 +64,21 @@ class MoreTests(unittest.TestCase):
         for name in ("Acme Dumpsters", "Toyland Hauling"):
             tags = {"name": name, "phone": "303-343-7096"}
             self.assertIsNone(element_to_row({"type": "node", "id": 1, "tags": tags}, "CO", "x"), name)
-        # The word doesn't have to be "waste" specifically -- garbage/trash/sanitation/refuse/
-        # disposal/rubbish all count, since the point is "residential trash hauler," not the word.
-        for name in ("Southwest Sanitation", "Downtown Trash Removal", "Acme Garbage Co",
-                     "City Refuse Pickup", "Acme Disposal Services", "Olde Towne Rubbish Co"):
+        # The word doesn't have to be "waste" specifically -- garbage/trash/refuse/disposal/rubbish
+        # all count, since the point is "residential trash hauler," not the word.
+        for name in ("Downtown Trash Removal", "Acme Garbage Co", "City Refuse Pickup",
+                     "Acme Disposal Services", "Olde Towne Rubbish Co"):
             tags = {"name": name, "phone": "303-343-7096"}
             self.assertIsNotNone(element_to_row({"type": "node", "id": 1, "tags": tags}, "CO", "x"), name)
+
+    def test_sanitation_alone_does_not_qualify(self):
+        # Found live: plenty of real "___ Sanitation" businesses are portable-toilet/porta-potty
+        # rental companies, not residential trash haulers, with nothing in the name to tell them
+        # apart. So unlike waste/garbage/trash/refuse/disposal/rubbish, "sanitation" alone isn't
+        # enough -- it has to also carry one of those other words, or match a KNOWN_BRANDS entry.
+        for name in ("Southwest Sanitation", "Acme Sanitation Co", "Downtown Sanitation Services"):
+            tags = {"name": name, "phone": "303-343-7096"}
+            self.assertIsNone(element_to_row({"type": "node", "id": 1, "tags": tags}, "CO", "x"), name)
 
     def test_only_garbage_pickup_companies_are_kept(self):
         for name in ("Colorado Medical Waste", "Marine Sanitation & Supply", "Sunset Landfill Waste",

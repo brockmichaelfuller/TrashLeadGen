@@ -40,11 +40,14 @@ QUERY_TIMEOUT_SECONDS = 300
 COLUMNS = ["company_name", "phone", "email", "website", "address", "city", "state", "timezone", "source",
            "date_collected", "status", "notes"]
 
-NAME_KEYWORDS = ["waste", "garbage", "trash", "sanitation", "refuse", "disposal", "rubbish"]
+NAME_KEYWORDS = ["waste", "garbage", "trash", "refuse", "disposal", "rubbish"]
 NAME_REGEX = "|".join(NAME_KEYWORDS)
 # The name must contain one of these as a whole word (plurals allowed), so "Wasted Ink" or "Unwaste"
 # don't match. The point isn't the word "waste" specifically -- it's that the business reads as a
 # residential trash hauler by name; EXCLUDE_NAME below is what actually narrows that down.
+# "Sanitation" alone deliberately isn't in this list: found live that plenty of real businesses
+# using just that word are portable-toilet/porta-potty rental companies, not trash haulers, and
+# nothing in the name itself distinguishes the two.
 KEYWORD_NAME = re.compile(rf"\b({NAME_REGEX})s?\b", re.I)
 # Major national/regional residential haulers whose branch listings are often just the brand name,
 # with none of NAME_KEYWORDS in it (e.g. "Rumpke", "Republic Services") -- without this, they're
