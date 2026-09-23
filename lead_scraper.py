@@ -199,6 +199,46 @@ def element_to_row(element, state, today):
     return row
 
 
+# Phrases that describe the business's actual service, found on a live scrape: several companies
+# passed the name-based filters (nothing in "Horizon Disposal Services" or "Precision Disposal"
+# says "dumpster") but turned out, on their own website, to be dumpster rental, junk removal, or
+# portable-toilet/septic companies -- not a normal weekly residential trash route.
+DISQUALIFYING_SERVICE_PHRASES = [
+    "dumpster rental", "roll-off rental", "roll off rental", "roll-off dumpster", "roll off dumpster",
+    "junk removal", "junk hauling", "property cleanout", "home cleanout", "estate cleanout",
+    "portable toilet", "porta potty rental", "porta-potty rental", "septic pumping", "septic tank",
+    "construction debris removal", "demolition debris",
+]
+# If a site also uses ordinary residential-service language, it's kept regardless of the above --
+# plenty of real haulers mention roll-off/bulk/commercial service alongside their core weekly route
+# (e.g. RAM Waste Systems, Waste Pro), and that combination shouldn't cost them the lead.
+QUALIFYING_SERVICE_PHRASES = [
+    "weekly curbside", "curbside pickup", "curbside collection", "curbside service",
+    "residential pickup", "residential trash", "residential garbage", "residential service",
+    "weekly collection", "weekly trash pickup", "weekly pick-up", "weekly pickup", "trash pickup",
+]
+WEBSITE_CHECK_TIMEOUT_SECONDS = 10
+WEBSITE_CHECK_MAX_CHARS = 300_000  # plenty for a marketing homepage; keeps a huge page from stalling the regex
+
+
+def website_offers_residential_pickup(website):
+    """Best-effort, free check of a candidate's own website for whether it actually offers normal
+    weekly residential pickup, catching the class of false positive that a name alone won't reveal.
+    Deliberately fails open: no website, an unreachable site, or ambiguous wording all keep the lead
+    rather than drop it -- this is one more signal on top of the name filters, not a replacement for
+    reviewing the list, and a network hiccup here should never cost a real lead."""
+    if not website:
+        return True
+    try:
+        response = requests.get(website, timeout=WEBSITE_CHECK_TIMEOUT_SECONDS, headers={"User-Agent": USER_AGENT})
+        text = re.sub(r"<[^>]+>", " ", response.text[:WEBSITE_CHECK_MAX_CHARS]).lower()
+    except requests.RequestException:
+        return True
+    if any(phrase in text for phrase in QUALIFYING_SERVICE_PHRASES):
+        return True
+    return not any(phrase in text for phrase in DISQUALIFYING_SERVICE_PHRASES)
+
+
 def fetch_elements(state_code):
     query = build_query(state_code)
     headers = {"User-Agent": USER_AGENT, "Accept": "application/json"}
@@ -286,7 +326,7 @@ def _attempt_state(state, writer, out, output_path, seen, today):
         new = 0
         for element in elements:
             row = element_to_row(element, state, today)
-            if row and row["phone"] not in seen:
+            if row and row["phone"] not in seen and website_offers_residential_pickup(row["website"]):
                 seen.add(row["phone"])
                 writer.writerow(row)
                 new += 1

@@ -2,10 +2,11 @@ import csv
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import lead_scraper
-from lead_scraper import STATE_GROUPS, STATES, clean_email, element_to_row, is_complete, missing_fields, load_existing_phones, normalize_phone, run
+from lead_scraper import (STATE_GROUPS, STATES, clean_email, element_to_row, is_complete, missing_fields,
+                           load_existing_phones, normalize_phone, run, website_offers_residential_pickup)
 
 
 class NormalizePhoneTests(unittest.TestCase):
@@ -228,6 +229,34 @@ class RunResilienceTests(unittest.TestCase):
                 run(output_path, ["CO"])
         summary_lines = [c.args[0] for c in mock_print.call_args_list if c.args]
         self.assertTrue(any("Failed states (rerun to retry): CO" in line for line in summary_lines), summary_lines)
+
+
+class WebsiteResidentialPickupCheckTests(unittest.TestCase):
+    def test_no_website_is_kept_unverified(self):
+        self.assertTrue(website_offers_residential_pickup(""))
+
+    def test_unreachable_site_fails_open(self):
+        with patch("lead_scraper.requests.get", side_effect=lead_scraper.requests.RequestException("timeout")):
+            self.assertTrue(website_offers_residential_pickup("https://example.com"))
+
+    def test_pure_dumpster_rental_site_is_rejected(self):
+        # Modeled on "Horizon Disposal Services": all roll-off/dumpster language, nothing about a
+        # normal residential route.
+        html = "<html><body><h1>Roll-Off Dumpster Rental</h1><p>Fast, affordable dumpster rental for home cleanouts and construction debris removal.</p></body></html>"
+        with patch("lead_scraper.requests.get", return_value=MagicMock(text=html)):
+            self.assertFalse(website_offers_residential_pickup("https://example.com"))
+
+    def test_a_site_that_also_mentions_dumpsters_is_still_kept_if_it_offers_curbside_service(self):
+        # Modeled on "RAM Waste Systems": real weekly residential pickup that also happens to
+        # mention roll-off rentals as one of several services -- must not be penalized for that.
+        html = "<html><body><p>Weekly curbside pickup for residential customers, plus temporary dumpster rental for projects.</p></body></html>"
+        with patch("lead_scraper.requests.get", return_value=MagicMock(text=html)):
+            self.assertTrue(website_offers_residential_pickup("https://example.com"))
+
+    def test_a_site_with_neither_signal_is_kept_unverified(self):
+        html = "<html><body><p>Welcome to our company. Call us for a quote.</p></body></html>"
+        with patch("lead_scraper.requests.get", return_value=MagicMock(text=html)):
+            self.assertTrue(website_offers_residential_pickup("https://example.com"))
 
 
 if __name__ == "__main__":
