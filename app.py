@@ -207,6 +207,10 @@ class Handler(BaseHTTPRequestHandler):
             which = {"complete": "complete", "partial": "partial"}.get(parse_qs(query).get("set", [""])[0], "all")
             self.send_body(export_csv(LEADS_PATH, which), "text/csv",
                            extra={"Content-Disposition": f'attachment; filename="leads-{which}.csv"'})
+        elif path == "/api/debug.log":
+            debug_path = LEADS_PATH.parent / "debug.log"
+            body = debug_path.read_bytes() if debug_path.exists() else b"(empty)"
+            self.send_body(body, "text/plain; charset=utf-8")
         else:
             self.send_body(b"Not found", "text/plain", 404)
 

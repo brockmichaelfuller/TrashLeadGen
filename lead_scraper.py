@@ -243,6 +243,20 @@ def _friendly_error(error):
     return "the map data source had a temporary problem"
 
 
+def log_debug_detail(output_path, state, error):
+    """Append the real exception (with traceback) to debug.log, next to the CSV. The UI's log only
+    ever shows _friendly_error()'s plain-English version; this is the raw detail for actually
+    diagnosing a recurring failure, fetched separately via GET /api/debug.log."""
+    debug_path = output_path.parent / "debug.log"
+    try:
+        with debug_path.open("a", encoding="utf-8") as f:
+            f.write(f"\n--- {datetime.now().isoformat(timespec='seconds')} {state} ---\n")
+            f.write(f"{type(error).__name__}: {error}\n")
+            traceback.print_exc(file=f)
+    except OSError:
+        pass  # debug logging must never itself break a run
+
+
 def run(output_path, states):
     output_path.parent.mkdir(parents=True, exist_ok=True)
     sync_leads.restore(output_path)  # recover prior runs' data on a fresh (empty) host
@@ -279,9 +293,8 @@ def run(output_path, states):
             except Exception as error:  # one bad state must not stop the run
                 message = _friendly_error(error)
                 print(f"[{i + 1}/{len(states)}] {state}: skipped -- {message}", file=sys.stderr)
-                if message == "the map data source had a temporary problem":  # not a recognized network
-                    traceback.print_exc(file=sys.stderr)                      # error -- keep detail to debug
-                failed.append(state)
+                log_debug_detail(output_path, state, error)  # the real exception, for /api/debug.log --
+                failed.append(state)                          # never shown in the user-facing log/UI
             time.sleep(REQUEST_DELAY_SECONDS)
 
     print(f"Done. {total_new} new rows -> {output_path} ({len(seen)} total unique phones)")
