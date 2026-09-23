@@ -12,6 +12,7 @@ import hmac
 import io
 import json
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -101,15 +102,21 @@ def pump_output(proc):
     proc.wait()
 
 
-FAILED_STATES_MARKER = "Failed states (rerun to retry): "
+# Matches lead_scraper.py's per-state failure line, e.g. "[3/13] CO: skipped -- couldn't connect...".
+SKIPPED_STATE_RE = re.compile(r"^\[\d+/\d+\] (\S+): skipped\b")
 
 
 def parse_failed_states(log_lines):
-    """States lead_scraper.py reported as failed on the last completed run, from its summary line."""
+    """States lead_scraper.py skipped this run, read straight from its per-state log lines as they're
+    printed -- not just from its end-of-run summary, so a run that crashes or gets killed partway
+    through (before reaching that summary) still leaves every skipped state retryable."""
+    seen, result = set(), []
     for line in log_lines:
-        if FAILED_STATES_MARKER in line:
-            return [s.strip() for s in line.split(FAILED_STATES_MARKER, 1)[1].split(",") if s.strip()]
-    return []
+        match = SKIPPED_STATE_RE.match(line)
+        if match and match.group(1) not in seen:
+            seen.add(match.group(1))
+            result.append(match.group(1))
+    return result
 
 
 def start_run(group_id="all", explicit_states=None):
