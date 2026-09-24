@@ -33,21 +33,50 @@ _sheets_session_tried = False
 # company name, a way to reach them, and their timezone (for knowing when to call).
 COMPLETE_FIELDS = ("company_name", "phone", "email", "timezone")
 
+# Sections shown in the sheet, top to bottom, each separated by a blank row. A lead with no status
+# yet (the normal state right after scraping) sits first since it's what still needs a decision;
+# any status that isn't one of these (shouldn't happen -- the site's dropdown only offers these
+# four) is grouped last rather than dropped.
+STATUS_SECTIONS = ["", "Interested", "Not interested", "Do not contact"]
 
-def _sort_complete_first(rows):
-    """Reorder CSV data rows (header stays first) so complete leads are grouped together at the
-    top, ahead of leads missing any of COMPLETE_FIELDS. Stable within each group."""
+
+def _group_and_sort(rows):
+    """Reorder CSV data rows (header stays first) into per-status sections in STATUS_SECTIONS
+    order, each separated by a blank row, with complete leads (see COMPLETE_FIELDS) grouped first
+    within every section. If there's no "status" column, falls back to just a complete-first sort."""
     if len(rows) < 2:
         return rows
     header, data = rows[0], rows[1:]
     try:
-        indexes = [header.index(field) for field in COMPLETE_FIELDS]
+        complete_indexes = [header.index(field) for field in COMPLETE_FIELDS]
     except ValueError:
         return rows  # header doesn't have the expected columns -- leave order alone
     def is_complete(row):
-        return all(idx < len(row) and row[idx].strip() for idx in indexes)
-    data = sorted(data, key=lambda row: not is_complete(row))
-    return [header] + data
+        return all(idx < len(row) and row[idx].strip() for idx in complete_indexes)
+
+    if "status" not in header:
+        return [header] + sorted(data, key=lambda row: not is_complete(row))
+
+    status_idx = header.index("status")
+    def status_of(row):
+        return row[status_idx].strip() if status_idx < len(row) else ""
+
+    sections = {name: [] for name in STATUS_SECTIONS}
+    other = []
+    for row in data:
+        s = status_of(row)
+        (sections[s] if s in sections else other).append(row)
+    groups = [group for group in (sections[name] for name in STATUS_SECTIONS) if group]
+    if other:
+        groups.append(other)
+    groups = [sorted(group, key=lambda row: not is_complete(row)) for group in groups]
+
+    result = [header]
+    for i, group in enumerate(groups):
+        if i > 0:
+            result.append([])  # blank separator row between sections
+        result.extend(group)
+    return result
 
 
 def _warn(action, error):
@@ -121,7 +150,7 @@ def push_sheets(local_path):
         rows = list(csv.reader(f))
     if not rows:
         return
-    rows = _sort_complete_first(rows)
+    rows = _group_and_sort(rows)
     base = f"https://sheets.googleapis.com/v4/spreadsheets/{sheet_id}/values"
     try:
         # "A1" alone names a single cell, not the whole sheet -- clearing just that one cell left

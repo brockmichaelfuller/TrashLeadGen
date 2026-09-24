@@ -157,6 +157,34 @@ class SheetsEnabledTests(unittest.TestCase):
 
     @patch.dict("os.environ", {"GOOGLE_SHEET_ID": "sheet123", "GOOGLE_SERVICE_ACCOUNT_JSON": "x"}, clear=True)
     @patch("sync_leads._sheets_session_or_none")
+    def test_push_sections_by_status_with_blank_rows_between(self, mock_session_fn):
+        mock_session = MagicMock()
+        mock_session.put.return_value = MagicMock(status_code=200)
+        mock_session_fn.return_value = mock_session
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "leads.csv"
+            with path.open("w", newline="") as f:
+                writer = csv.writer(f)
+                writer.writerow(["company_name", "phone", "email", "timezone", "status"])
+                writer.writerow(["Not Interested Co", "1", "a@b.com", "CST", "Not interested"])
+                writer.writerow(["No Status Co", "2", "a@b.com", "CST", ""])
+                writer.writerow(["Do Not Contact Co", "3", "a@b.com", "CST", "Do not contact"])
+                writer.writerow(["Interested Co", "4", "a@b.com", "CST", "Interested"])
+            sync_leads.push_sheets(path)
+        sent_values = mock_session.put.call_args.kwargs["json"]["values"]
+        self.assertEqual(sent_values, [
+            ["company_name", "phone", "email", "timezone", "status"],
+            ["No Status Co", "2", "a@b.com", "CST", ""],
+            [],
+            ["Interested Co", "4", "a@b.com", "CST", "Interested"],
+            [],
+            ["Not Interested Co", "1", "a@b.com", "CST", "Not interested"],
+            [],
+            ["Do Not Contact Co", "3", "a@b.com", "CST", "Do not contact"],
+        ])
+
+    @patch.dict("os.environ", {"GOOGLE_SHEET_ID": "sheet123", "GOOGLE_SERVICE_ACCOUNT_JSON": "x"}, clear=True)
+    @patch("sync_leads._sheets_session_or_none")
     def test_pull_writes_rows_and_pads_ragged_ones(self, mock_session_fn):
         mock_session = MagicMock()
         mock_session.get.return_value = MagicMock(
