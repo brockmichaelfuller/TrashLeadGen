@@ -29,6 +29,26 @@ GITHUB_CSV_PATH = "output/leads.csv"
 _sheets_session = None
 _sheets_session_tried = False
 
+# A lead counts as "complete" for sorting purposes once it has enough info to actually act on --
+# company name, a way to reach them, and their timezone (for knowing when to call).
+COMPLETE_FIELDS = ("company_name", "phone", "email", "timezone")
+
+
+def _sort_complete_first(rows):
+    """Reorder CSV data rows (header stays first) so complete leads are grouped together at the
+    top, ahead of leads missing any of COMPLETE_FIELDS. Stable within each group."""
+    if len(rows) < 2:
+        return rows
+    header, data = rows[0], rows[1:]
+    try:
+        indexes = [header.index(field) for field in COMPLETE_FIELDS]
+    except ValueError:
+        return rows  # header doesn't have the expected columns -- leave order alone
+    def is_complete(row):
+        return all(idx < len(row) and row[idx].strip() for idx in indexes)
+    data = sorted(data, key=lambda row: not is_complete(row))
+    return [header] + data
+
 
 def _warn(action, error):
     print(f"sync_leads: {action} failed: {error}", file=sys.stderr)
@@ -101,6 +121,7 @@ def push_sheets(local_path):
         rows = list(csv.reader(f))
     if not rows:
         return
+    rows = _sort_complete_first(rows)
     base = f"https://sheets.googleapis.com/v4/spreadsheets/{sheet_id}/values"
     try:
         # "A1" alone names a single cell, not the whole sheet -- clearing just that one cell left
