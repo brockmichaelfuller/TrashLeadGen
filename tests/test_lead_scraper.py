@@ -151,6 +151,21 @@ class MoreTests(unittest.TestCase):
             tags = {"name": name, "phone": "303-343-7096"}
             self.assertIsNone(element_to_row({"type": "node", "id": 1, "tags": tags}, "CO", "x"), name)
 
+    def test_non_hauler_facilities_and_businesses_caught_in_audit_are_excluded(self):
+        # All caught live in a lead-quality audit: transfer facilities whose names drop "station",
+        # public yard-waste drop sites, a recycle depot, and businesses that merely use a hauling
+        # word (paper/metal recyclers, a waste-to-energy vendor, a fleet liquidator, a K-9 poop
+        # service, and shops selling clothing, furniture or needlepoint).
+        for name in ("Rumpke Circleville Transfer", "Waste Management LaPorte Transfer",
+                     "Republic Services Akron Transfer & Recycling", "Midway Yard Waste Site",
+                     "Republic Services Corvallis Recycle Depot", "Hub City Waste Paper, LLC",
+                     "Central Waste Material Co", "Waste To Energy Systems LLC",
+                     "Fleet Vehicle Disposal & Commercial Liquidations", "Monarch K-9 Waste Removal",
+                     "Zero Waste Daniel", "Waste Knot Needlepoint", "White Trash Furnishings",
+                     "Trash Clothing Co"):
+            tags = {"name": name, "phone": "303-343-7096"}
+            self.assertIsNone(element_to_row({"type": "node", "id": 1, "tags": tags}, "CO", "x"), name)
+
     def test_a_dot_gov_website_is_excluded_regardless_of_name(self):
         # Caught live: "Fayetteville Recycling & Trash Collection" (fayetteville-ar.gov) and "McKay
         # Bay Scale House Waste Disposal" (tampa.gov) -- both municipal facilities whose plain name
@@ -284,6 +299,13 @@ class WebsiteResidentialPickupCheckTests(unittest.TestCase):
         html = "<html><body><p>Weekly curbside pickup for residential customers, plus temporary dumpster rental for projects.</p></body></html>"
         with patch("lead_scraper.requests.get", return_value=MagicMock(text=html)):
             self.assertTrue(website_offers_residential_pickup("https://example.com"))
+
+    def test_generic_trash_pickup_wording_does_not_rescue_a_junk_removal_site(self):
+        # Modeled on "Breezeway Disposal": a junk-removal company whose copy says "trash pickup"
+        # in passing -- that alone must not count as a weekly residential route.
+        html = "<html><body><h1>Junk Removal</h1><p>Fast junk and trash pickup, estate cleanout and property cleanout.</p></body></html>"
+        with patch("lead_scraper.requests.get", return_value=MagicMock(text=html)):
+            self.assertFalse(website_offers_residential_pickup("https://example.com"))
 
     def test_a_site_with_neither_signal_is_kept_unverified(self):
         html = "<html><body><p>Welcome to our company. Call us for a quote.</p></body></html>"

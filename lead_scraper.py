@@ -71,17 +71,18 @@ BRAND_NAME = re.compile(BRAND_REGEX, re.I)
 # pet-waste scoopers.
 EXCLUDE_NAME = re.compile(
     r"water|sewer|sewage|septic|medical|biohazard|hazardous|hazmat|marine|boat|\bsupply\b|supplies|equipment|"
-    r"pest|plumb|landfill|transfer station|waste transfer|material recovery|\bsolid waste\b|"
-    r"recycling (center|facility|depot)|scrap|salvage|metal|mattress|"
+    r"pest|plumb|landfill|\btransfer\b|material recovery|\bsolid waste\b|yard waste|"
+    r"recycl(e|ing) (center|facility|depot)|scrap|salvage|metal|mattress|"
+    r"waste paper|waste material|waste[- ]to[- ]energy|\bvehicle|liquidat|"
     r"e-?waste|electronic|shred|portable|porta[- ]?(potty|john)|toilet|restroom|cleaning|janitor|"
     r"\b(city|town|village|county|township|state) of\b|\b(department|dept|division|bureau|commission|agency|"
     r"authority|public works|municipal|school|hospital|clinic|dental|veterinary)\b|\bfacility\b|"
     r"drop[- ]?off|collection center|convenience center|"
     r"dumpster|roll[- ]?off|\bjunk\b|\bbulk\b|construction|demolition|debris|industrial|"
     r"campus|sustainability|headquarters|corporate office|\bstore\b|\bshop\b|\bmarket\b|"
-    r"treasures|antique|consignment|thrift|vintage|"
+    r"treasures|antique|consignment|thrift|vintage|furnishings|clothing|apparel|needlepoint|\bzero waste\b|"
     r"\bmov(ing|ers)\b|relocation|"
-    r"pet waste|dog waste|pooper|\bpoop\b|\bscoop|"
+    r"pet waste|dog waste|\bk-?9\b|pooper|\bpoop\b|\bscoop|"
     r"\btires?\b|textile|"
     r"\bcafe\b|\bcoffee\b|\broastery\b|\brestaurant\b|\bbakery\b",
     re.I,
@@ -212,10 +213,12 @@ DISQUALIFYING_SERVICE_PHRASES = [
 # If a site also uses ordinary residential-service language, it's kept regardless of the above --
 # plenty of real haulers mention roll-off/bulk/commercial service alongside their core weekly route
 # (e.g. RAM Waste Systems, Waste Pro), and that combination shouldn't cost them the lead.
+# Bare "trash pickup" deliberately isn't here: found live on a junk-removal site ("Breezeway
+# Disposal", "get rid of junk and trash") -- it's too generic to vouch for a weekly route.
 QUALIFYING_SERVICE_PHRASES = [
     "weekly curbside", "curbside pickup", "curbside collection", "curbside service",
     "residential pickup", "residential trash", "residential garbage", "residential service",
-    "weekly collection", "weekly trash pickup", "weekly pick-up", "weekly pickup", "trash pickup",
+    "weekly collection", "weekly trash pickup", "weekly pick-up", "weekly pickup",
 ]
 WEBSITE_CHECK_TIMEOUT_SECONDS = 10
 WEBSITE_CHECK_MAX_CHARS = 300_000  # plenty for a marketing homepage; keeps a huge page from stalling the regex
