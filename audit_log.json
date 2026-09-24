@@ -1,18 +1,452 @@
 {
   "_comment": "Tracks which leads have already been manually/AI-reviewed for being a genuine residential curbside weekly trash hauler (not bulk-only, dumpster rental, junk removal, government facility, etc.). Read by the recurring audit process so it only reviews leads it hasn't seen before, instead of starting over every time a new session runs it. Update this file (add newly-reviewed phones, keep the JSON valid) and commit it whenever the audit runs, regardless of which session is running it.",
   "reviewed": {
-    "(336) 573-1616": {"company": "Waste Management - Stoneville, NC", "verdict": "kept", "reviewed_at": "2026-09-23"},
-    "(352) 463-6200": {"company": "Waste Pro", "verdict": "kept", "reviewed_at": "2026-09-23"},
-    "(386) 788-8890": {"company": "Waste Pro", "verdict": "kept", "reviewed_at": "2026-09-23"},
-    "(520) 895-3441": {"company": "Waste Disposal", "verdict": "kept", "reviewed_at": "2026-09-23"},
-    "(530) 335-2723": {"company": "Burney Disposal Inc", "verdict": "kept", "reviewed_at": "2026-09-23"},
-    "(559) 276-8314": {"company": "Alamos Sanitation Services", "verdict": "kept", "reviewed_at": "2026-09-23"},
-    "(704) 636-3581": {"company": "All American Disposal Corp.", "verdict": "kept", "reviewed_at": "2026-09-23"},
-    "(707) 552-3110": {"company": "Recology Vallejo", "verdict": "kept", "reviewed_at": "2026-09-23"},
-    "(719) 634-7177": {"company": "Springs Waste Systems", "verdict": "kept", "reviewed_at": "2026-09-23"},
-    "(800) 299-4898": {"company": "Consolidated Disposal Service", "verdict": "kept", "reviewed_at": "2026-09-23"},
-    "(912) 352-2229": {"company": "Curbie Sanitation", "verdict": "kept", "reviewed_at": "2026-09-23"},
-    "(919) 989-1562": {"company": "All Star Waste Services", "verdict": "kept", "reviewed_at": "2026-09-23"},
-    "(970) 226-3396": {"company": "RAM Waste Systems", "verdict": "kept", "reviewed_at": "2026-09-23"}
+    "(336) 573-1616": {
+      "company": "Waste Management - Stoneville, NC",
+      "verdict": "kept",
+      "reviewed_at": "2026-09-23"
+    },
+    "(352) 463-6200": {
+      "company": "Waste Pro",
+      "verdict": "kept",
+      "reviewed_at": "2026-09-23"
+    },
+    "(386) 788-8890": {
+      "company": "Waste Pro",
+      "verdict": "kept",
+      "reviewed_at": "2026-09-23"
+    },
+    "(520) 895-3441": {
+      "company": "Waste Disposal",
+      "verdict": "kept",
+      "reviewed_at": "2026-09-23"
+    },
+    "(530) 335-2723": {
+      "company": "Burney Disposal Inc",
+      "verdict": "kept",
+      "reviewed_at": "2026-09-23"
+    },
+    "(559) 276-8314": {
+      "company": "Alamos Sanitation Services",
+      "verdict": "kept",
+      "reviewed_at": "2026-09-23"
+    },
+    "(704) 636-3581": {
+      "company": "All American Disposal Corp.",
+      "verdict": "kept",
+      "reviewed_at": "2026-09-23"
+    },
+    "(707) 552-3110": {
+      "company": "Recology Vallejo",
+      "verdict": "kept",
+      "reviewed_at": "2026-09-23"
+    },
+    "(719) 634-7177": {
+      "company": "Springs Waste Systems",
+      "verdict": "kept",
+      "reviewed_at": "2026-09-23"
+    },
+    "(800) 299-4898": {
+      "company": "Consolidated Disposal Service",
+      "verdict": "kept",
+      "reviewed_at": "2026-09-23"
+    },
+    "(912) 352-2229": {
+      "company": "Curbie Sanitation",
+      "verdict": "kept",
+      "reviewed_at": "2026-09-23"
+    },
+    "(919) 989-1562": {
+      "company": "All Star Waste Services",
+      "verdict": "kept",
+      "reviewed_at": "2026-09-23"
+    },
+    "(970) 226-3396": {
+      "company": "RAM Waste Systems",
+      "verdict": "kept",
+      "reviewed_at": "2026-09-23"
+    },
+    "(864) 801-1436": {
+      "company": "Waste Connections",
+      "verdict": "kept",
+      "reviewed_at": "2026-09-23"
+    },
+    "(731) 422-4297": {
+      "company": "Hub City Waste Paper, LLC",
+      "verdict": "deleted",
+      "reviewed_at": "2026-09-23",
+      "reason": "paper/metal recycling center"
+    },
+    "(865) 435-9848": {
+      "company": "Waste Connections of Tennessee",
+      "verdict": "kept",
+      "reviewed_at": "2026-09-23"
+    },
+    "(877) 661-4511": {
+      "company": "Rush Refuse Systems",
+      "verdict": "deleted",
+      "reviewed_at": "2026-09-23",
+      "reason": "refuse truck dealer"
+    },
+    "(972) 971-5092": {
+      "company": "Green Cart Waste & Recycling",
+      "verdict": "deleted",
+      "reviewed_at": "2026-09-23",
+      "reason": "valet/bulk trash for multifamily, cleanouts"
+    },
+    "(281) 313-2378": {
+      "company": "Best Trash",
+      "verdict": "kept",
+      "reviewed_at": "2026-09-23"
+    },
+    "(801) 462-1661": {
+      "company": "At Your Disposal LLC",
+      "verdict": "deleted",
+      "reviewed_at": "2026-09-23",
+      "reason": "dumpster rental / junk removal"
+    },
+    "(703) 807-1828": {
+      "company": "Waste Knot Needlepoint",
+      "verdict": "deleted",
+      "reviewed_at": "2026-09-23",
+      "reason": "needlepoint shop"
+    },
+    "(757) 857-9700": {
+      "company": "Bay Disposal",
+      "verdict": "kept",
+      "reviewed_at": "2026-09-23"
+    },
+    "(509) 476-3910": {
+      "company": "Upper Valley Disposal",
+      "verdict": "kept",
+      "reviewed_at": "2026-09-23"
+    },
+    "(509) 582-5121": {
+      "company": "Waste Management - Kennewick, WA",
+      "verdict": "kept",
+      "reviewed_at": "2026-09-23"
+    },
+    "(920) 730-9500": {
+      "company": "City Disposal Services",
+      "verdict": "deleted",
+      "reviewed_at": "2026-09-23",
+      "reason": "dumpster rental"
+    },
+    "(307) 532-7515": {
+      "company": "TDS Trash Services",
+      "verdict": "kept",
+      "reviewed_at": "2026-09-23"
+    },
+    "(770) 462-0454": {
+      "company": "Breezeway Disposal",
+      "verdict": "deleted",
+      "reviewed_at": "2026-09-23",
+      "reason": "junk removal"
+    },
+    "(217) 522-7797": {
+      "company": "Republic Services",
+      "verdict": "kept",
+      "reviewed_at": "2026-09-23"
+    },
+    "(309) 929-9901": {
+      "company": "GFL Environmental",
+      "verdict": "deleted",
+      "reviewed_at": "2026-09-23",
+      "reason": "transfer station"
+    },
+    "(800) 989-2539": {
+      "company": "Republic Services",
+      "verdict": "kept",
+      "reviewed_at": "2026-09-23"
+    },
+    "(866) 797-9018": {
+      "company": "Waste Management LaPorte Transfer",
+      "verdict": "deleted",
+      "reviewed_at": "2026-09-23",
+      "reason": "transfer station"
+    },
+    "(855) 852-7110": {
+      "company": "Waste Management",
+      "verdict": "kept",
+      "reviewed_at": "2026-09-23"
+    },
+    "(225) 567-2409": {
+      "company": "Waste To Energy Systems LLC",
+      "verdict": "deleted",
+      "reviewed_at": "2026-09-23",
+      "reason": "waste-to-energy vendor"
+    },
+    "(800) 937-7767": {
+      "company": "Pro Waste Environmental Services",
+      "verdict": "deleted",
+      "reviewed_at": "2026-09-23",
+      "reason": "industrial/hazardous waste"
+    },
+    "(207) 487-5048": {
+      "company": "Bolster's Rubbish & Recycling",
+      "verdict": "kept",
+      "reviewed_at": "2026-09-23"
+    },
+    "(800) 545-4560": {
+      "company": "Waste Management of Boston North",
+      "verdict": "kept",
+      "reviewed_at": "2026-09-23"
+    },
+    "(616) 261-4344": {
+      "company": "Plummers Disposal Service",
+      "verdict": "deleted",
+      "reviewed_at": "2026-09-23",
+      "reason": "dumpster & porta-potty rental"
+    },
+    "(989) 370-3277": {
+      "company": "Weaver's Disposal",
+      "verdict": "kept",
+      "reviewed_at": "2026-09-23"
+    },
+    "(989) 470-8774": {
+      "company": "Little Guys Trash Company",
+      "verdict": "kept",
+      "reviewed_at": "2026-09-23"
+    },
+    "(906) 635-5971": {
+      "company": "Waste Management",
+      "verdict": "kept",
+      "reviewed_at": "2026-09-23"
+    },
+    "(888) 947-2643": {
+      "company": "Granger Waste Management Company",
+      "verdict": "kept",
+      "reviewed_at": "2026-09-23"
+    },
+    "(231) 597-0200": {
+      "company": "GFL Environmental Incorporated",
+      "verdict": "kept",
+      "reviewed_at": "2026-09-23"
+    },
+    "(507) 625-5746": {
+      "company": "Minnesota Waste Processing Company",
+      "verdict": "kept",
+      "reviewed_at": "2026-09-23"
+    },
+    "(651) 633-3279": {
+      "company": "Midway Yard Waste Site",
+      "verdict": "deleted",
+      "reviewed_at": "2026-09-23",
+      "reason": "county yard waste site"
+    },
+    "(952) 944-1071": {
+      "company": "Eden Prairie Yard Waste Site",
+      "verdict": "deleted",
+      "reviewed_at": "2026-09-23",
+      "reason": "city yard waste site"
+    },
+    "(314) 231-2798": {
+      "company": "Central Waste Material Co",
+      "verdict": "deleted",
+      "reviewed_at": "2026-09-23",
+      "reason": "metal distributor"
+    },
+    "(410) 817-9101": {
+      "company": "CRS Waste Dispisal",
+      "verdict": "flagged",
+      "reviewed_at": "2026-09-23",
+      "reason": "no website; search only finds CRS Recycling Services (Baltimore) -- unconfirmed"
+    },
+    "(240) 795-2501": {
+      "company": "US Refuse Removal",
+      "verdict": "kept",
+      "reviewed_at": "2026-09-23"
+    },
+    "(402) 537-4649": {
+      "company": "Monarch K-9 Waste Removal",
+      "verdict": "deleted",
+      "reviewed_at": "2026-09-23",
+      "reason": "dog waste removal"
+    },
+    "(308) 635-6673": {
+      "company": "Waste Connections",
+      "verdict": "kept",
+      "reviewed_at": "2026-09-23"
+    },
+    "(347) 807-5889": {
+      "company": "Rubbish Out",
+      "verdict": "flagged",
+      "reviewed_at": "2026-09-23",
+      "reason": "no website; no search results -- likely junk removal, unconfirmed"
+    },
+    "(631) 225-3366": {
+      "company": "Gotta Go Rubbish Removal",
+      "verdict": "deleted",
+      "reviewed_at": "2026-09-23",
+      "reason": "dumpster/demolition"
+    },
+    "(518) 439-4209": {
+      "company": "ICS Waste & Recycling",
+      "verdict": "kept",
+      "reviewed_at": "2026-09-23"
+    },
+    "(845) 590-7265": {
+      "company": "Jet Waste Inc",
+      "verdict": "flagged",
+      "reviewed_at": "2026-09-23",
+      "reason": "Jet Waste Services is a Houston-based broker/dumpster company; unclear if this NY listing hauls residential"
+    },
+    "(931) 237-0023": {
+      "company": "P\u00e8re Trash",
+      "verdict": "deleted",
+      "reviewed_at": "2026-09-23",
+      "reason": "clothing brand"
+    },
+    "(315) 342-0832": {
+      "company": "Butler Disposal Systems",
+      "verdict": "kept",
+      "reviewed_at": "2026-09-23"
+    },
+    "(347) 227-7060": {
+      "company": "Zero Waste Daniel",
+      "verdict": "deleted",
+      "reviewed_at": "2026-09-23",
+      "reason": "upcycled clothing"
+    },
+    "(212) 598-5956": {
+      "company": "White Trash",
+      "verdict": "deleted",
+      "reviewed_at": "2026-09-23",
+      "reason": "furniture store"
+    },
+    "(718) 237-5596": {
+      "company": "Waste Connections of New York",
+      "verdict": "kept",
+      "reviewed_at": "2026-09-23"
+    },
+    "(518) 885-5977": {
+      "company": "Plan It Waste & Recycling",
+      "verdict": "deleted",
+      "reviewed_at": "2026-09-23",
+      "reason": "auto salvage/scrap"
+    },
+    "(419) 946-8070": {
+      "company": "Mid-State Waste",
+      "verdict": "kept",
+      "reviewed_at": "2026-09-23"
+    },
+    "(419) 522-9018": {
+      "company": "Garbage Guys Who Care",
+      "verdict": "kept",
+      "reviewed_at": "2026-09-23"
+    },
+    "(440) 992-0503": {
+      "company": "C&C Disposal, LLC",
+      "verdict": "kept",
+      "reviewed_at": "2026-09-23"
+    },
+    "(937) 318-5376": {
+      "company": "Waste Management of Ohio Fairborn Transfer",
+      "verdict": "deleted",
+      "reviewed_at": "2026-09-23",
+      "reason": "transfer station"
+    },
+    "(614) 833-5237": {
+      "company": "Waste Management of Ohio Transfer & Recycling",
+      "verdict": "deleted",
+      "reviewed_at": "2026-09-23",
+      "reason": "transfer station"
+    },
+    "(740) 345-1212": {
+      "company": "Republic Services Mount Vernon Transfer",
+      "verdict": "deleted",
+      "reviewed_at": "2026-09-23",
+      "reason": "transfer station"
+    },
+    "(513) 851-0122": {
+      "company": "Rumpke Circleville Transfer",
+      "verdict": "deleted",
+      "reviewed_at": "2026-09-23",
+      "reason": "transfer station"
+    },
+    "(330) 434-9183": {
+      "company": "Republic Services Akron Transfer & Recycling",
+      "verdict": "deleted",
+      "reviewed_at": "2026-09-23",
+      "reason": "transfer station"
+    },
+    "(740) 342-1180": {
+      "company": "WIN Waste New Lexington",
+      "verdict": "deleted",
+      "reviewed_at": "2026-09-23",
+      "reason": "landfill"
+    },
+    "(330) 947-3465": {
+      "company": "Conrad's Disposal",
+      "verdict": "kept",
+      "reviewed_at": "2026-09-23"
+    },
+    "(541) 688-5622": {
+      "company": "Royal Refuse Service",
+      "verdict": "kept",
+      "reviewed_at": "2026-09-23"
+    },
+    "(541) 779-4161": {
+      "company": "Rogue Disposal & Recycling, Inc.",
+      "verdict": "kept",
+      "reviewed_at": "2026-09-23"
+    },
+    "(541) 942-8321": {
+      "company": "Cottage Grove Garbage Service",
+      "verdict": "kept",
+      "reviewed_at": "2026-09-23"
+    },
+    "(503) 472-3176": {
+      "company": "Recology Western Oregon",
+      "verdict": "kept",
+      "reviewed_at": "2026-09-23"
+    },
+    "(541) 563-3888": {
+      "company": "Dahl Disposal Service - Waldport",
+      "verdict": "kept",
+      "reviewed_at": "2026-09-23"
+    },
+    "(503) 397-1534": {
+      "company": "Hudson Garbage Service",
+      "verdict": "kept",
+      "reviewed_at": "2026-09-23"
+    },
+    "(541) 336-2932": {
+      "company": "Dahl Disposal Service - Toledo",
+      "verdict": "kept",
+      "reviewed_at": "2026-09-23"
+    },
+    "(541) 754-0444": {
+      "company": "Republic Services Corvallis Recycle Depot",
+      "verdict": "deleted",
+      "reviewed_at": "2026-09-23",
+      "reason": "recycle depot"
+    },
+    "(541) 988-3016": {
+      "company": "McKenzie Disposal",
+      "verdict": "kept",
+      "reviewed_at": "2026-09-23"
+    },
+    "(888) 255-3933": {
+      "company": "Fleet Vehicle Disposal & Commercial Liquidations",
+      "verdict": "deleted",
+      "reviewed_at": "2026-09-23",
+      "reason": "fleet vehicle liquidator"
+    },
+    "(724) 668-2020": {
+      "company": "Salandro's Refuse Inc",
+      "verdict": "kept",
+      "reviewed_at": "2026-09-23"
+    },
+    "(610) 754-0103": {
+      "company": "Whitetail Disposal, Inc.",
+      "verdict": "kept",
+      "reviewed_at": "2026-09-23"
+    },
+    "(406) 541-7171": {
+      "company": "Grizzily Disposal & Recycling",
+      "verdict": "kept",
+      "reviewed_at": "2026-09-23"
+    }
   }
 }
