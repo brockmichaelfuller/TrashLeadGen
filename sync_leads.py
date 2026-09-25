@@ -179,6 +179,11 @@ def pull_sheets(local_path):
         rows = response.json().get("values", [])
         if not rows:
             return
+        # Drop wholly-blank rows -- push_sheets inserts them as visual separators between status
+        # sections, and Sheets returns them as [] (or a shorter row of blank cells). Without this,
+        # each one round-trips back into the CSV as a lead with every field empty.
+        header, data = rows[0], [row for row in rows[1:] if any(cell.strip() for cell in row)]
+        rows = [header] + data
         local_path.parent.mkdir(parents=True, exist_ok=True)
         with local_path.open("w", newline="", encoding="utf-8") as f:
             writer = csv.writer(f)

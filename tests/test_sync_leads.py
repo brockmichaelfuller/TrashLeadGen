@@ -198,6 +198,26 @@ class SheetsEnabledTests(unittest.TestCase):
                 rows = list(csv.reader(f))
         self.assertEqual(rows, [["company_name", "phone", "notes"], ["Acme", "555", ""]])
 
+    @patch.dict("os.environ", {"GOOGLE_SHEET_ID": "sheet123", "GOOGLE_SERVICE_ACCOUNT_JSON": "x"}, clear=True)
+    @patch("sync_leads._sheets_session_or_none")
+    def test_pull_drops_blank_separator_rows(self, mock_session_fn):
+        # push_sheets inserts a wholly-blank row between status sections (see _group_and_sort);
+        # pulling that back must not resurrect it as a lead with every field empty.
+        mock_session = MagicMock()
+        mock_session.get.return_value = MagicMock(status_code=200, json=lambda: {"values": [
+            ["company_name", "phone", "email", "timezone", "status"],
+            ["A", "1", "a@b.com", "CST", ""],
+            [],
+            ["B", "2", "b@c.com", "EST", "Interested"],
+        ]})
+        mock_session_fn.return_value = mock_session
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "leads.csv"
+            sync_leads.pull_sheets(path)
+            with path.open() as f:
+                rows = list(csv.DictReader(f))
+        self.assertEqual([r["company_name"] for r in rows], ["A", "B"])
+
 
 class RestoreTests(unittest.TestCase):
     def setUp(self):
