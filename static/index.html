@@ -32,6 +32,11 @@
   button.primary:hover { filter: brightness(1.08); }
   button.danger { color: var(--danger); }
   button:disabled { opacity: .5; cursor: not-allowed; }
+  /* A plain link styled to match its sibling buttons -- avoids nesting a <button> inside an <a>,
+     which is invalid HTML and gets keyboard-focused twice. */
+  a.btn-link { display: inline-flex; align-items: center; justify-content: center; text-decoration: none;
+               border: 1px solid var(--line); background: var(--panel); border-radius: 7px; padding: 7px 12px; cursor: pointer; }
+  a.btn-link:hover { background: var(--row); }
   input, select { border: 1px solid var(--line); background: var(--bg); border-radius: 7px; padding: 7px 10px; width: 100%; }
   .row { display: flex; gap: 8px; align-items: center; }
   .row > * { flex: 1; }
@@ -81,7 +86,7 @@
 <body>
 <header>
   <h1>TrashLeadGen</h1>
-  <div class="sub">Waste &amp; dumpster company leads from open map data. Free, no API key.</div>
+  <div class="sub">Residential trash-pickup companies across the U.S., from open map data. Free, no API key.</div>
 </header>
 
 <main>
@@ -112,8 +117,8 @@
   <section class="card">
     <h2>Leads</h2>
     <div class="tabs">
-      <button class="tab active" id="tabComplete">Complete (name, phone, email, timezone) <b id="cntComplete">0</b></button>
-      <button class="tab" id="tabPartial">Partial (missing something) <b id="cntPartial">0</b></button>
+      <button class="tab active" id="tabPartial">Partial (missing something) <b id="cntPartial">0</b></button>
+      <button class="tab" id="tabComplete">Complete (name, phone, email, timezone) <b id="cntComplete">0</b></button>
     </div>
     <div class="stats">
       <div class="stat"><b id="statTotal">0</b><span>unique phones</span></div>
@@ -126,7 +131,7 @@
       <select id="stateFilter"><option value="">All states</option></select>
       <button id="copy">Copy phones</button>
       <button id="copyEmails">Copy emails</button>
-      <a id="download" href="/api/export.csv?set=complete" download><button type="button">Download CSV</button></a>
+      <a id="download" class="btn-link" href="/api/export.csv?set=partial" download>Download CSV</a>
     </div>
     <div class="scroll">
       <table>
@@ -148,7 +153,7 @@
 
 <script>
 const $ = id => document.getElementById(id);
-let tab = "complete", leads = [], sort = { k: null, dir: 1 }, wasRunning = false, seenSources = null;
+let tab = "partial", leads = [], sort = { k: null, dir: 1 }, wasRunning = false, seenSources = null;
 
 const api = (url, body) => fetch(url, body === undefined ? {} : {
   method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body)
@@ -288,7 +293,12 @@ function renderLeads() {
   $("statStates").textContent = new Set(inTab.map(l => l.state).filter(Boolean)).size;
   $("statShown").textContent = shown.length;
   $("empty").hidden = inTab.length > 0;
-  $("empty").textContent = tab === "complete" ? "No complete leads yet. Click Run scrape to collect them." : "No partial leads.";
+  if (inTab.length === 0) {
+    const otherCount = tab === "complete" ? leads.filter(l => !l.complete).length : leads.filter(l => l.complete).length;
+    if (!leads.length) $("empty").textContent = "No leads yet. Click Run scrape to collect them.";
+    else if (tab === "complete") $("empty").textContent = `No leads with email yet. ${otherCount} lead${otherCount === 1 ? "" : "s"} without email ${otherCount === 1 ? "is" : "are"} in the other tab.`;
+    else $("empty").textContent = `No partial leads. ${otherCount} complete lead${otherCount === 1 ? "" : "s"} ${otherCount === 1 ? "is" : "are"} in the other tab.`;
+  }
   const states = [...new Set(inTab.map(l => l.state).filter(Boolean))].sort();
   const cur = $("stateFilter").value;
   $("stateFilter").replaceChildren(new Option("All states", ""), ...states.map(s => new Option(s, s)));
@@ -321,24 +331,33 @@ async function poll() {
   $("run").disabled = s.running;
   $("stop").hidden = !s.running;
   const failed = s.failedStates || [];
+  const notReached = s.notReachedStates || [];
+  const outstanding = [...new Set([...failed, ...notReached])];
   if (s.started) {
     const scope = s.scope || "the entire U.S.";
     let text;
     if (s.running) text = `Scraping ${scope}…`;
-    else if (s.failed) text = "Something went wrong and the scrape didn't finish. You can try running it again.";
+    else if (s.stopped) {
+      text = s.plannedCount
+        ? `Stopped — ${s.finishedCount} of ${s.plannedCount} areas finished.${outstanding.length ? " Continue below." : ""}`
+        : "Stopped.";
+    }
+    else if (s.crashed) text = "Something went wrong and the scrape didn't finish. You can try running it again.";
     else if (failed.length) text = `Finished scraping ${scope} — ${failed.length} area${failed.length === 1 ? "" : "s"} couldn't be reached. Use Retry below.`;
     else text = `Finished scraping ${scope}.`;
     $("progressText").textContent = text;
-    const frac = s.running ? Math.max(0.06, progressFraction(s.log)) : (s.failed ? 0 : 1);
+    const frac = s.running ? Math.max(0.06, progressFraction(s.log))
+      : (s.crashed ? 0 : (s.plannedCount ? s.finishedCount / s.plannedCount : 1));
     $("barFill").style.width = `${frac * 100}%`;
     $("barFill").style.opacity = s.running ? .7 : 1;
     const log = $("log"), atEnd = log.scrollTop + log.clientHeight >= log.scrollHeight - 20;
     log.textContent = s.log.join("\n");
     if (atEnd) log.scrollTop = log.scrollHeight;
   }
-  $("retryFailed").hidden = s.running || !failed.length;
-  $("retryFailed").textContent = `Retry ${failed.length} failed state${failed.length === 1 ? "" : "s"} (${failed.join(", ")})`;
-  $("retryFailed").dataset.states = JSON.stringify(failed);
+  $("retryFailed").hidden = s.running || !outstanding.length;
+  const verb = s.stopped ? "Continue" : "Retry", noun = s.stopped ? "remaining" : "failed";
+  $("retryFailed").textContent = `${verb} ${outstanding.length} ${noun} state${outstanding.length === 1 ? "" : "s"} (${outstanding.join(", ")})`;
+  $("retryFailed").dataset.states = JSON.stringify(outstanding);
   // Rebuilding the leads table wipes any text selection in it, which breaks copy/paste of a phone
   // number, note, etc. right in the middle of a scrape (when this refresh fires every 2s). Skip the
   // rebuild -- but keep updating progress above -- while the user has something selected; the next

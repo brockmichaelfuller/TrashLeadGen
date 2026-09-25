@@ -22,7 +22,7 @@ from urllib.parse import parse_qs
 
 ROOT = Path(__file__).parent
 sys.path.insert(0, str(ROOT))
-from lead_scraper import COLUMNS, STATE_GROUPS, dedupe_by_phone, ensure_columns, is_rejected, missing_fields  # noqa: E402
+from lead_scraper import COLUMNS, STATE_GROUPS, STATES, dedupe_by_phone, ensure_columns, is_rejected, missing_fields  # noqa: E402
 from datetime import date  # noqa: E402
 import sync_leads  # noqa: E402
 LEADS_PATH = ROOT / "output" / "leads.csv"
@@ -38,7 +38,7 @@ GROUPS = [{"id": str(i + 1), "label": f"{g[0]}–{g[-1]} ({len(g)} states)", "st
           for i, g in enumerate(STATE_GROUPS)] if USING_OSM else []
 
 lock = threading.Lock()
-job = {"proc": None, "log": [], "started": False, "scope": ""}
+job = {"proc": None, "log": [], "started": False, "scope": "", "states": None, "stopped": False}
 
 
 def read_csv(path):
@@ -155,6 +155,28 @@ def parse_failed_states(log_lines):
     return [state for state in order if failed[state]]
 
 
+def parse_finished_states(log_lines):
+    """States lead_scraper.py has logged any outcome for so far (success or skip), in the order
+    first seen. Used to tell which of a run's planned states were actually reached before it ended
+    -- whether that's because it finished normally, crashed, or the user clicked Stop -- so the page
+    can say what's left instead of just "something went wrong"."""
+    order = []
+    for line in log_lines:
+        match = STATE_OUTCOME_RE.match(line)
+        if match and match.group(1) not in order:
+            order.append(match.group(1))
+    return order
+
+
+# Lines lead_scraper.py prints that are meant for someone running it directly from a terminal -- a
+# server file path, "rerun to retry" CLI wording -- and have no place in the plain-language web log.
+_CLI_ONLY_LINE_RE = re.compile(r"^Done\. |^Failed states \(rerun to retry\):")
+
+
+def user_facing_log(log_lines):
+    return [line for line in log_lines if not _CLI_ONLY_LINE_RE.match(line)]
+
+
 def start_run(group_id="all", explicit_states=None):
     """One scrape: the whole U.S., one ~13-state group, or (for the "retry failed" button) an
     explicit list of state codes. Groups and explicit states are OSM-only; Overture is one query."""
@@ -167,6 +189,10 @@ def start_run(group_id="all", explicit_states=None):
         if group_id and group_id != "all" and not group:
             return "Unknown group."
         states, label = (group["states"], group["label"]) if group else (None, "the entire U.S.")
+    if states is None and USING_OSM:
+        # Materialize the real planned list (instead of letting the scraper fall back to its own
+        # default) so progress/stop reporting always has something concrete to compare against.
+        states = list(STATES)
     with lock:
         if is_running():
             return "A run is already in progress."
@@ -174,7 +200,7 @@ def start_run(group_id="all", explicit_states=None):
         if states:
             cmd += ["--states", *states]
         proc = subprocess.Popen(cmd, cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-        job.update(proc=proc, log=[], started=True, scope=label)
+        job.update(proc=proc, log=[], started=True, scope=label, states=states, stopped=False)
     threading.Thread(target=pump_output, args=(proc,), daemon=True).start()
     return None
 
@@ -233,10 +259,20 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/api/status":
             with lock:
                 running = is_running()
-                self.send_json({"running": running, "started": job["started"], "log": job["log"],
-                            "scope": job["scope"],
+                finished = parse_finished_states(job["log"])
+                planned = job["states"]
+                not_reached = [] if running or not planned else [s for s in planned if s not in finished]
+                # A nonzero exit only means "something went wrong" if the user didn't cause it by
+                # clicking Stop -- terminate() makes the process exit nonzero too, and that's expected.
+                crashed = (not running and not job["stopped"] and job["proc"] is not None
+                           and (job["proc"].poll() or 0) != 0)
+                self.send_json({"running": running, "started": job["started"],
+                            "log": user_facing_log(job["log"]), "scope": job["scope"],
+                            "stopped": job["stopped"], "crashed": crashed,
                             "failedStates": [] if running else parse_failed_states(job["log"]),
-                            "failed": job["proc"] is not None and (job["proc"].poll() or 0) != 0})
+                            "notReachedStates": not_reached,
+                            "finishedCount": len(finished),
+                            "plannedCount": len(planned) if planned else None})
         elif path == "/api/groups":
             self.send_json({"groups": GROUPS})
         elif path == "/api/export.csv":
@@ -262,6 +298,7 @@ class Handler(BaseHTTPRequestHandler):
             with lock:
                 if is_running():
                     job["proc"].terminate()
+                    job["stopped"] = True
             return self.send_json({"ok": True})
         if path == "/api/lead":
             phone = (data.get("phone") or "").strip()

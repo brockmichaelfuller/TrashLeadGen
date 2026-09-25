@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from app import delete_lead, parse_failed_states, read_csv
+from app import delete_lead, parse_failed_states, parse_finished_states, read_csv, user_facing_log
 from lead_scraper import load_existing_phones, normalize_phone
 
 
@@ -53,6 +53,37 @@ class ParseFailedStatesTests(unittest.TestCase):
             "Failed states (rerun to retry): CO",
         ]
         self.assertEqual(parse_failed_states(log), ["CO"])
+
+
+class ParseFinishedStatesTests(unittest.TestCase):
+    def test_reads_states_with_any_outcome_success_or_skip(self):
+        log = [
+            "[1/3] AL: 2 new companies",
+            "[2/3] AK: skipped -- couldn't connect to the map data source",
+        ]
+        self.assertEqual(parse_finished_states(log), ["AL", "AK"])
+
+    def test_a_state_never_reached_is_absent(self):
+        # This is what tells a Stopped run's status which planned states it never even got to.
+        log = ["[1/3] AL: 2 new companies"]
+        self.assertEqual(parse_finished_states(log), ["AL"])
+
+    def test_does_not_duplicate_a_state_seen_across_a_retry_round(self):
+        log = [
+            "[1/1] CO: skipped -- couldn't connect to the map data source",
+            "retry succeeded: CO: 0 new companies",
+        ]
+        self.assertEqual(parse_finished_states(log), ["CO"])
+
+
+class UserFacingLogTests(unittest.TestCase):
+    def test_strips_the_cli_only_summary_lines(self):
+        log = [
+            "[1/1] CO: 4 new companies",
+            "Done. 4 new rows -> /opt/render/project/src/output/leads.csv (4 total unique phones)",
+            "Failed states (rerun to retry): AK",
+        ]
+        self.assertEqual(user_facing_log(log), ["[1/1] CO: 4 new companies"])
 
 
 class DeleteLeadTests(unittest.TestCase):
