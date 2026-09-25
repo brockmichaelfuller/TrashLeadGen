@@ -22,7 +22,8 @@ from urllib.parse import parse_qs
 
 ROOT = Path(__file__).parent
 sys.path.insert(0, str(ROOT))
-from lead_scraper import COLUMNS, STATE_GROUPS, dedupe_by_phone, missing_fields  # noqa: E402
+from lead_scraper import COLUMNS, STATE_GROUPS, dedupe_by_phone, ensure_columns, is_rejected, missing_fields  # noqa: E402
+from datetime import date  # noqa: E402
 import sync_leads  # noqa: E402
 LEADS_PATH = ROOT / "output" / "leads.csv"
 INDEX_PATH = ROOT / "static" / "index.html"
@@ -41,11 +42,13 @@ job = {"proc": None, "log": [], "started": False, "scope": ""}
 
 
 def read_csv(path):
-    """All leads, each flagged complete (name, phone, email and timezone) or partial, with what's missing."""
+    """All non-rejected leads, each flagged complete (name, phone, email and timezone) or partial,
+    with what's missing. Rejected rows (see delete_lead) are kept in the file but never surfaced here."""
     if not path.exists():
         return []
     with path.open(newline="", encoding="utf-8") as f:
         rows = list(csv.DictReader(f))
+    rows = [row for row in rows if not is_rejected(row)]
     for row in rows:
         missing = missing_fields(row)
         row["complete"] = not missing
@@ -73,8 +76,10 @@ def update_lead(path, phone, updates):
 
 
 def delete_lead(path, phone):
-    """Remove the row with this phone number outright -- for a lead that never should have matched
-    (wrong business type), as opposed to a real hauler marked "Do not contact". Returns False if the
+    """Mark the row with this phone number rejected -- for a lead that never should have matched
+    (wrong business type), as opposed to a real hauler marked "Do not contact". The row is kept
+    (just hidden from read_csv and everything built on it) rather than removed outright, so its
+    phone permanently blocks the scraper from re-adding it on a later run. Returns False if the
     phone isn't found."""
     if not path.exists():
         return False
@@ -82,13 +87,16 @@ def delete_lead(path, phone):
         reader = csv.DictReader(f)
         fieldnames = reader.fieldnames
         rows = list(reader)
-    remaining = [r for r in rows if r.get("phone") != phone]
-    if len(remaining) == len(rows):
+    row = next((r for r in rows if r.get("phone") == phone), None)
+    if row is None:
         return False
+    row["rejected_at"] = date.today().isoformat()
+    if "rejected_at" not in fieldnames:  # older CSV, in case this runs before ensure_columns does
+        fieldnames = list(fieldnames) + ["rejected_at"]
     with path.open("w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
-        writer.writerows(remaining)
+        writer.writerows(rows)
     return True
 
 
@@ -287,6 +295,7 @@ def main():
     if host != "127.0.0.1" and not os.environ.get("APP_PASSWORD"):
         sys.exit("Refusing to listen on the network without APP_PASSWORD set.")
     sync_leads.restore(LEADS_PATH)  # restore the last backup, since a fresh host starts empty
+    ensure_columns(LEADS_PATH)  # upgrade an older CSV (e.g. one missing "rejected_at") in place
     if dedupe_by_phone(LEADS_PATH):  # clean up anything an overlapping run/restore duplicated
         sync_leads.sync(LEADS_PATH)
     server = ThreadingHTTPServer((host, args.port), Handler)

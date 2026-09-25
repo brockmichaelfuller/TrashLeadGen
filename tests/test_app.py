@@ -3,7 +3,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from app import delete_lead, parse_failed_states
+from app import delete_lead, parse_failed_states, read_csv
+from lead_scraper import load_existing_phones, normalize_phone
 
 
 class ParseFailedStatesTests(unittest.TestCase):
@@ -55,7 +56,9 @@ class ParseFailedStatesTests(unittest.TestCase):
 
 
 class DeleteLeadTests(unittest.TestCase):
-    def test_removes_only_the_matching_row(self):
+    def test_marks_only_the_matching_row_rejected_rather_than_removing_it(self):
+        # The row is kept (not removed) so its phone permanently blocks the scraper from treating
+        # it as new again -- see is_rejected() and the scraper's use of load_existing_phones().
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "leads.csv"
             with path.open("w", newline="") as f:
@@ -66,7 +69,30 @@ class DeleteLeadTests(unittest.TestCase):
             self.assertTrue(delete_lead(path, "222"))
             with path.open() as f:
                 rows = list(csv.DictReader(f))
-        self.assertEqual([r["company_name"] for r in rows], ["Keep Me"])
+        self.assertEqual([r["company_name"] for r in rows], ["Keep Me", "Remove Me"])
+        self.assertEqual(rows[0]["rejected_at"], "")
+        self.assertTrue(rows[1]["rejected_at"])
+
+    def test_rejected_leads_are_hidden_from_read_csv(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "leads.csv"
+            with path.open("w", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=["company_name", "phone"])
+                writer.writeheader()
+                writer.writerow({"company_name": "Keep Me", "phone": "111"})
+                writer.writerow({"company_name": "Remove Me", "phone": "222"})
+            delete_lead(path, "222")
+            self.assertEqual([r["company_name"] for r in read_csv(path)], ["Keep Me"])
+
+    def test_a_rejected_phone_is_never_treated_as_new_by_a_later_scrape(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "leads.csv"
+            with path.open("w", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=["company_name", "phone"])
+                writer.writeheader()
+                writer.writerow({"company_name": "Junk Removal Co", "phone": "222"})
+            delete_lead(path, "222")
+            self.assertIn(normalize_phone("222") or "222", load_existing_phones(path))
 
     def test_returns_false_for_an_unknown_phone(self):
         with tempfile.TemporaryDirectory() as tmp:

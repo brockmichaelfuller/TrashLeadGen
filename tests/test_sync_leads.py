@@ -132,6 +132,28 @@ class SheetsEnabledTests(unittest.TestCase):
 
     @patch.dict("os.environ", {"GOOGLE_SHEET_ID": "sheet123", "GOOGLE_SERVICE_ACCOUNT_JSON": "x"}, clear=True)
     @patch("sync_leads._sheets_session_or_none")
+    def test_push_leaves_out_rejected_leads(self, mock_session_fn):
+        # Rejected rows (see app.py's delete_lead) stay in the CSV forever so the scraper never
+        # re-adds them, but they have no reason to show up in the sheet.
+        mock_session = MagicMock()
+        mock_session.put.return_value = MagicMock(status_code=200)
+        mock_session_fn.return_value = mock_session
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "leads.csv"
+            with path.open("w", newline="") as f:
+                writer = csv.writer(f)
+                writer.writerow(["company_name", "phone", "rejected_at"])
+                writer.writerow(["Keep Co", "1", ""])
+                writer.writerow(["Junk Removal Co", "2", "2026-09-24"])
+            sync_leads.push_sheets(path)
+        sent_values = mock_session.put.call_args.kwargs["json"]["values"]
+        self.assertEqual(sent_values, [
+            ["company_name", "phone", "rejected_at"],
+            ["Keep Co", "1", ""],
+        ])
+
+    @patch.dict("os.environ", {"GOOGLE_SHEET_ID": "sheet123", "GOOGLE_SERVICE_ACCOUNT_JSON": "x"}, clear=True)
+    @patch("sync_leads._sheets_session_or_none")
     def test_push_groups_complete_leads_at_the_top(self, mock_session_fn):
         mock_session = MagicMock()
         mock_session.put.return_value = MagicMock(status_code=200)

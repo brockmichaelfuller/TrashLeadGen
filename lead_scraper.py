@@ -38,7 +38,7 @@ MAX_ATTEMPTS = 4  # cycles through all 3 mirrors at least once, then retries the
 QUERY_TIMEOUT_SECONDS = 300
 
 COLUMNS = ["company_name", "phone", "email", "website", "address", "city", "state", "timezone", "source",
-           "date_collected", "status", "notes"]
+           "date_collected", "status", "notes", "rejected_at"]
 
 NAME_KEYWORDS = ["waste", "garbage", "trash", "refuse", "disposal", "rubbish"]
 NAME_REGEX = "|".join(NAME_KEYWORDS)
@@ -117,6 +117,13 @@ def missing_fields(row):
 
 def is_complete(row):
     return not missing_fields(row)
+
+
+def is_rejected(row):
+    """True once a lead has been deleted as the wrong business type (see app.py's delete_lead).
+    The row is kept rather than removed so its phone stays in load_existing_phones()'s "seen" set
+    forever, instead of being treated as new and re-added on a later scrape."""
+    return bool((row.get("rejected_at") or "").strip())
 
 # Fallback when a lead has no coordinates: the state's main timezone (split states use where most people live).
 STATE_TIMEZONES = {

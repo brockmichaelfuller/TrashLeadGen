@@ -6,7 +6,8 @@ from unittest.mock import MagicMock, patch
 
 import lead_scraper
 from lead_scraper import (STATE_GROUPS, STATES, clean_email, dedupe_by_phone, element_to_row, is_complete,
-                           missing_fields, load_existing_phones, normalize_phone, run, website_offers_residential_pickup)
+                           is_rejected, missing_fields, load_existing_phones, normalize_phone, run,
+                           website_offers_residential_pickup)
 
 
 class NormalizePhoneTests(unittest.TestCase):
@@ -203,6 +204,11 @@ class RequiredFieldsTests(unittest.TestCase):
         row = element_to_row({"type": "node", "id": 1, "tags": tags}, "CO", "x")
         self.assertEqual(missing_fields(row), ["email"])
         self.assertFalse(is_complete(row))
+
+    def test_is_rejected(self):
+        self.assertFalse(is_rejected({"rejected_at": ""}))
+        self.assertFalse(is_rejected({}))
+        self.assertTrue(is_rejected({"rejected_at": "2026-09-24"}))
 
     def test_clean_email(self):
         self.assertEqual(clean_email("Info@Acme.com; other@acme.com"), "info@acme.com")

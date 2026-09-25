@@ -140,6 +140,15 @@ def _sheets_session_or_none():
     return _sheets_session
 
 
+def _drop_rejected(rows):
+    """Leave out leads rejected as the wrong business type (see app.py's delete_lead) -- they're
+    kept in the CSV so the scraper never re-adds them, but they have no reason to clutter the sheet."""
+    if len(rows) < 2 or "rejected_at" not in rows[0]:
+        return rows
+    idx = rows[0].index("rejected_at")
+    return [rows[0]] + [row for row in rows[1:] if not (idx < len(row) and row[idx].strip())]
+
+
 def push_sheets(local_path):
     """Overwrite the configured sheet's first tab with the current CSV content."""
     sheet_id = os.environ.get("GOOGLE_SHEET_ID")
@@ -150,6 +159,7 @@ def push_sheets(local_path):
         rows = list(csv.reader(f))
     if not rows:
         return
+    rows = _drop_rejected(rows)
     rows = _group_and_sort(rows)
     base = f"https://sheets.googleapis.com/v4/spreadsheets/{sheet_id}/values"
     try:
