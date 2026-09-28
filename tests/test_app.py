@@ -5,7 +5,8 @@ import time
 import unittest
 from pathlib import Path
 
-from app import delete_lead, parse_failed_states, parse_finished_states, read_csv, update_lead, user_facing_log
+from app import (delete_lead, parse_failed_states, parse_finished_states, read_csv, undelete_lead,
+                  update_lead, user_facing_log)
 from lead_scraper import load_existing_phones, locked, normalize_phone
 
 
@@ -139,6 +140,38 @@ class DeleteLeadTests(unittest.TestCase):
     def test_returns_false_when_the_file_does_not_exist(self):
         with tempfile.TemporaryDirectory() as tmp:
             self.assertFalse(delete_lead(Path(tmp) / "missing.csv", "111"))
+
+
+class UndeleteLeadTests(unittest.TestCase):
+    def test_clears_rejected_at_and_the_lead_reappears(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "leads.csv"
+            with path.open("w", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=["company_name", "phone"])
+                writer.writeheader()
+                writer.writerow({"company_name": "Oops Not Junk After All", "phone": "222"})
+            delete_lead(path, "222")
+            self.assertEqual(read_csv(path), [])
+            self.assertTrue(undelete_lead(path, "222"))
+            self.assertEqual([r["company_name"] for r in read_csv(path)], ["Oops Not Junk After All"])
+
+    def test_returns_false_for_a_lead_that_was_never_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "leads.csv"
+            with path.open("w", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=["company_name", "phone"])
+                writer.writeheader()
+                writer.writerow({"company_name": "A", "phone": "111"})
+            self.assertFalse(undelete_lead(path, "111"))
+
+    def test_returns_false_for_an_unknown_phone(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "leads.csv"
+            with path.open("w", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=["company_name", "phone"])
+                writer.writeheader()
+                writer.writerow({"company_name": "A", "phone": "111"})
+            self.assertFalse(undelete_lead(path, "999"))
 
 
 class UpdateLeadTests(unittest.TestCase):

@@ -101,6 +101,27 @@ def delete_lead(path, phone):
     return True
 
 
+def undelete_lead(path, phone):
+    """Undo a delete within the same page load (see the "Undo" link in the UI right after removing
+    a lead) by clearing rejected_at. Returns False if the phone isn't found or wasn't rejected."""
+    if not path.exists():
+        return False
+    with locked(path):
+        with path.open(newline="", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            fieldnames = reader.fieldnames
+            rows = list(reader)
+        row = next((r for r in rows if r.get("phone") == phone), None)
+        if row is None or not is_rejected(row):
+            return False
+        row["rejected_at"] = ""
+        with path.open("w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(rows)
+    return True
+
+
 # Leads marked with either of these are kept in the UI (for the record) but left out of every
 # export and copy action, so a "do not contact" or declined lead can't accidentally get dialed.
 DO_NOT_EXPORT_STATUSES = {"Not interested", "Do not contact"}
@@ -315,6 +336,15 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json({"error": "phone is required"}, 400)
             with lock:
                 ok = delete_lead(LEADS_PATH, phone)
+            if ok:
+                sync_leads.sync(LEADS_PATH)
+            return self.send_json({"ok": True}) if ok else self.send_json({"error": "Lead not found"}, 404)
+        if path == "/api/lead/undelete":
+            phone = (data.get("phone") or "").strip()
+            if not phone:
+                return self.send_json({"error": "phone is required"}, 400)
+            with lock:
+                ok = undelete_lead(LEADS_PATH, phone)
             if ok:
                 sync_leads.sync(LEADS_PATH)
             return self.send_json({"ok": True}) if ok else self.send_json({"error": "Lead not found"}, 404)

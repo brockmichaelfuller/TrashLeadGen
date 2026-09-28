@@ -79,6 +79,10 @@
   tbody tr:hover { background: var(--row); }
   .src { color: var(--muted); font-size: 12px; }
   .empty { text-align: center; color: var(--muted); padding: 40px 0; }
+  .undoBar { display: flex; align-items: center; gap: 10px; background: var(--row); border: 1px solid var(--line);
+             border-radius: 7px; padding: 8px 12px; margin-bottom: 12px; font-size: 13px; }
+  .undoBar[hidden] { display: none; }
+  .removeBtn { padding: 4px 10px; font-size: 12px; }
   .note { color: var(--muted); font-size: 12px; margin-top: 12px; }
   .err { color: var(--danger); margin-top: 8px; min-height: 1em; }
 </style>
@@ -120,6 +124,10 @@
       <button class="tab active" id="tabPartial">Partial (missing something) <b id="cntPartial">0</b></button>
       <button class="tab" id="tabComplete">Complete (name, phone, email, timezone) <b id="cntComplete">0</b></button>
     </div>
+    <div class="undoBar" id="undoBar" hidden>
+      <span id="undoText"></span>
+      <button type="button" class="link" id="undoBtn">Undo</button>
+    </div>
     <div class="stats">
       <div class="stat"><b id="statTotal">0</b><span>unique phones</span></div>
       <div class="stat"><b id="statEmails">0</b><span>with email</span></div>
@@ -140,7 +148,7 @@
           <th data-k="status">Interested?</th><th>Notes</th>
           <th data-k="email">Email</th><th data-k="website">Website</th><th data-k="address">Address</th><th data-k="city">City</th>
           <th data-k="state">State</th><th data-k="timezone">Timezone</th><th data-k="date_collected">Collected</th><th data-k="missing" id="missingTh" hidden>Missing</th>
-          <th data-k="source">Source</th>
+          <th data-k="source">Source</th><th>Remove</th>
         </tr></thead>
         <tbody id="rows"></tbody>
       </table>
@@ -233,6 +241,41 @@ function notesCell(l) {
   return td;
 }
 
+function showUndo(l) {
+  const bar = $("undoBar");
+  clearTimeout(bar._hideTimer);
+  bar.hidden = false;
+  $("undoText").textContent = `Removed "${l.company_name || l.phone}" as not a trash hauler.`;
+  $("undoBtn").onclick = async () => {
+    clearTimeout(bar._hideTimer);
+    bar.hidden = true;
+    try { await api("/api/lead/undelete", { phone: l.phone }); await loadLeads(); }
+    catch (e) { $("err").textContent = e.message; }
+  };
+  bar._hideTimer = setTimeout(() => { bar.hidden = true; }, 8000);
+}
+
+function removeCell(l) {
+  const td = document.createElement("td");
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "danger removeBtn";
+  btn.textContent = "Remove";
+  btn.title = `Mark "${l.company_name || l.phone}" as not a residential trash hauler`;
+  btn.onclick = async () => {
+    const name = l.company_name || l.phone;
+    if (!confirm(`Remove "${name}"? This marks it as not a residential trash hauler, so it stays off future scrapes too. You can undo this for a few seconds after.`)) return;
+    try {
+      await api("/api/lead/delete", { phone: l.phone });
+      leads = leads.filter(x => x.phone !== l.phone);
+      renderLeads();
+      showUndo(l);
+    } catch (e) { $("err").textContent = e.message; }
+  };
+  td.append(btn);
+  return td;
+}
+
 function renderLeads() {
   // A note mid-typing (or the notes/status of the row it belongs to) must survive this rebuild --
   // a poll during an active scrape calls this every couple seconds, and losing focus or cursor
@@ -272,7 +315,7 @@ function renderLeads() {
     const src = document.createElement("td");
     src.textContent = l.source || "";
     src.className = "src";
-    tr.append(src);
+    tr.append(src, removeCell(l));
     return tr;
   }));
   seenSources = new Set(leads.map(l => l.source + l.phone));
