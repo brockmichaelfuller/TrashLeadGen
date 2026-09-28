@@ -101,6 +101,15 @@ python -m unittest discover -s tests -t .
 
 Runs automatically (along with `pyflakes`) on every push and pull request via `.github/workflows/ci.yml`.
 
+Most of the suite is server-side (the Python modules above). `tests/test_browser.py` is different -- it drives the actual page in a real headless browser against a real running server, since headline wording, Stop/Retry/Continue, the email filter, row-level errors, and the inline Remove confirm are all client-side JS that no server-side test can reach at all. It needs [Playwright](https://playwright.dev/python/) and a browser binary, which the base `requirements.txt` deliberately doesn't pull in (the production app itself needs neither):
+
+```bash
+pip install -r requirements-dev.txt
+playwright install chromium
+```
+
+It runs against `tests/fixtures/fake_scraper.py`, a stand-in for `lead_scraper.py` that speaks the same `--output`/`--states` CLI and understands a few special state codes (`SLOW<n>`, `FAIL`, `BLOCKED*` -- see that file) to trigger a slow/failed/blocked state on demand, so Run/Stop/Retry can be exercised through the real subprocess/log-parsing code path without ever hitting Overpass over the network. If `test_browser.py`'s tests are missing from a local run, Playwright isn't installed -- `unittest` skips the whole file rather than failing, but CI always has it.
+
 ## Notes
 
 - Keep API keys, if any are added later, in `.env`. It is already in `.gitignore`.
