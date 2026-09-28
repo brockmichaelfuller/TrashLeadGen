@@ -49,6 +49,8 @@
   .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin: 8px 0; }
   .bar { height: 8px; background: var(--row); border-radius: 4px; overflow: hidden; margin: 10px 0 8px; }
   .bar div { height: 100%; width: 0; background: var(--accent); transition: width .3s; }
+  .bar div.warn { background: #c9862b; }
+  .bar div.danger { background: var(--danger); }
   pre { margin: 0; max-height: 150px; overflow: auto; background: var(--bg); border: 1px solid var(--line);
         border-radius: 7px; padding: 8px 10px; font: 12px/1.5 ui-monospace, Menlo, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
   .stats { display: flex; gap: 24px; margin-bottom: 12px; }
@@ -82,6 +84,9 @@
   .undoBar { display: flex; align-items: center; gap: 10px; background: var(--row); border: 1px solid var(--line);
              border-radius: 7px; padding: 8px 12px; margin-bottom: 12px; font-size: 13px; }
   .undoBar[hidden] { display: none; }
+  .backupWarn { background: color-mix(in srgb, var(--danger) 12%, var(--panel)); color: var(--danger);
+                border: 1px solid var(--danger); border-radius: 7px; padding: 8px 12px; margin-top: 10px; font-size: 13px; }
+  .backupWarn[hidden] { display: none; }
   .removeBtn { padding: 4px 10px; font-size: 12px; }
   .note { color: var(--muted); font-size: 12px; margin-top: 12px; }
   .err { color: var(--danger); margin-top: 8px; min-height: 1em; }
@@ -91,6 +96,9 @@
 <header>
   <h1>TrashLeadGen</h1>
   <div class="sub">Residential trash-pickup companies across the U.S., from open map data. Free, no API key.</div>
+  <div class="backupWarn" id="backupWarn" hidden>
+    ⚠ Changes are saving on this server, but the backup to Google Sheets/GitHub is currently failing -- it'll keep retrying automatically. If the site restarts before it clears, the very latest edits could be lost.
+  </div>
 </header>
 
 <main>
@@ -393,6 +401,10 @@ async function poll() {
       : (s.crashed ? 0 : (s.plannedCount ? s.finishedCount / s.plannedCount : 1));
     $("barFill").style.width = `${frac * 100}%`;
     $("barFill").style.opacity = s.running ? .7 : 1;
+    // A full-looking green bar after a run that failed or was stopped early reads as success --
+    // color it to match what actually happened instead of always looking like it finished clean.
+    $("barFill").classList.toggle("danger", !s.running && s.crashed);
+    $("barFill").classList.toggle("warn", !s.running && !s.crashed && (s.stopped || failed.length > 0));
     const log = $("log"), atEnd = log.scrollTop + log.clientHeight >= log.scrollHeight - 20;
     log.textContent = s.log.join("\n");
     if (atEnd) log.scrollTop = log.scrollHeight;
@@ -401,6 +413,10 @@ async function poll() {
   const verb = s.stopped ? "Continue" : "Retry", noun = s.stopped ? "remaining" : "failed";
   $("retryFailed").textContent = `${verb} ${outstanding.length} ${noun} state${outstanding.length === 1 ? "" : "s"} (${outstanding.join(", ")})`;
   $("retryFailed").dataset.states = JSON.stringify(outstanding);
+  // A save always succeeds locally first -- this is just letting the owner know the external
+  // backup (GitHub/Sheets) is currently failing, so a restart before it clears could lose the
+  // very latest edits. It keeps retrying in the background on its own; no action is needed here.
+  $("backupWarn").hidden = !s.backupError;
   // Rebuilding the leads table wipes any text selection in it, which breaks copy/paste of a phone
   // number, note, etc. right in the middle of a scrape (when this refresh fires every 2s). Skip the
   // rebuild -- but keep updating progress above -- while the user has something selected; the next

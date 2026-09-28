@@ -4,7 +4,9 @@ import threading
 import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
+import app
 from app import (delete_lead, parse_failed_states, parse_finished_states, read_csv, undelete_lead,
                   update_lead, user_facing_log)
 from lead_scraper import load_existing_phones, locked, normalize_phone
@@ -56,6 +58,14 @@ class ParseFailedStatesTests(unittest.TestCase):
             "Failed states (rerun to retry): CO",
         ]
         self.assertEqual(parse_failed_states(log), ["CO"])
+
+    def test_a_state_that_fails_in_the_outer_handler_still_shows_as_failed(self):
+        # A failure outside _attempt_state itself (the logging/sleep code around it) used to print
+        # without the "[i/n]" prefix the other two outcome formats use, so it silently never made it
+        # onto the retry button. Now prefixed the same way as every other outcome line.
+        log = ["[1/2] AL: skipped -- the map data source had a temporary problem",
+               "[2/2] AK: 1 new companies"]
+        self.assertEqual(parse_failed_states(log), ["AL"])
 
 
 class ParseFinishedStatesTests(unittest.TestCase):
@@ -256,6 +266,47 @@ class ConcurrentWriteTests(unittest.TestCase):
         # If the lock weren't exclusive, "second-start" could land between "first-start" and
         # "first-end". It must not: first has to fully finish before second ever starts.
         self.assertEqual(order, ["first-start", "first-end", "second-start", "second-end"])
+
+
+class BackupSchedulingTests(unittest.TestCase):
+    """schedule_sync() defers the actual push to a background Timer instead of blocking the
+    request, so these call app._run_sync() directly rather than waiting out the real delay."""
+
+    def tearDown(self):
+        with app.lock:
+            if app._sync_timer is not None:
+                app._sync_timer.cancel()
+                app._sync_timer = None
+        app.backup_state["error"] = None
+
+    @patch("app.sync_leads.sync", return_value=None)
+    def test_a_successful_sync_clears_any_previous_error(self, mock_sync):
+        app.backup_state["error"] = "old failure"
+        app._run_sync()
+        self.assertIsNone(app.backup_state["error"])
+        mock_sync.assert_called_once_with(app.LEADS_PATH)
+
+    @patch("app.sync_leads.sync", return_value="Google Sheets push failed: HTTP 500")
+    def test_a_failed_sync_is_recorded_and_schedules_a_retry(self, mock_sync):
+        app._run_sync()
+        self.assertEqual(app.backup_state["error"], "Google Sheets push failed: HTTP 500")
+        with app.lock:
+            self.assertIsNotNone(app._sync_timer)
+
+    def test_schedule_sync_sets_a_pending_timer(self):
+        app.schedule_sync()
+        with app.lock:
+            self.assertIsNotNone(app._sync_timer)
+
+    def test_a_new_edit_supersedes_a_pending_retry_instead_of_stacking(self):
+        with patch("app.sync_leads.sync", return_value="boom"):
+            app._run_sync()
+        with app.lock:
+            first_timer = app._sync_timer
+        app.schedule_sync()
+        with app.lock:
+            self.assertIsNot(app._sync_timer, first_timer)
+            self.assertFalse(first_timer.is_alive())  # the stale retry was cancelled, not left running
 
 
 if __name__ == "__main__":

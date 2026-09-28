@@ -79,8 +79,13 @@ def _group_and_sort(rows):
     return result
 
 
+last_backup_error = None  # most recent backup failure message; None once sync() succeeds cleanly
+
+
 def _warn(action, error):
-    print(f"sync_leads: {action} failed: {error}", file=sys.stderr)
+    global last_backup_error
+    last_backup_error = f"{action} failed: {error}"
+    print(f"sync_leads: {last_backup_error}", file=sys.stderr)
 
 
 def pull_github(local_path):
@@ -89,15 +94,18 @@ def pull_github(local_path):
     if not token or not repo:
         return
     try:
+        # The "raw" media type returns the file's actual bytes directly, instead of the default
+        # JSON envelope's base64 "content" field -- which GitHub leaves empty for any file over
+        # 1MB, silently restoring an empty leads.csv once the list grew past that size.
         response = requests.get(
             f"{GITHUB_API}/repos/{repo}/contents/{GITHUB_CSV_PATH}",
-            headers={"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"},
+            headers={"Authorization": f"Bearer {token}", "Accept": "application/vnd.github.raw+json"},
             timeout=15,
         )
         if response.status_code == 200:
             local_path.parent.mkdir(parents=True, exist_ok=True)
-            local_path.write_bytes(base64.b64decode(response.json()["content"]))
-    except (requests.RequestException, ValueError, KeyError) as error:
+            local_path.write_bytes(response.content)
+    except requests.RequestException as error:
         _warn("GitHub pull", error)
 
 
@@ -205,9 +213,15 @@ def pull_sheets(local_path):
 
 
 def sync(local_path):
-    """Back up local_path everywhere that's configured. Safe to call after every change."""
+    """Back up local_path everywhere that's configured. Safe to call after every change. Returns
+    the failure message if either backend's push failed just now, or None if both succeeded (or
+    neither is configured) -- callers use this to surface a stuck backup instead of it failing
+    silently to stderr forever."""
+    global last_backup_error
+    last_backup_error = None
     push_github(local_path)
     push_sheets(local_path)
+    return last_backup_error
 
 
 def restore(local_path):

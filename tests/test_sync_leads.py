@@ -25,14 +25,25 @@ class GitHubDisabledTests(unittest.TestCase):
 class GitHubEnabledTests(unittest.TestCase):
     @patch.dict("os.environ", {"GITHUB_TOKEN": "t", "GITHUB_REPO": "me/repo"}, clear=True)
     @patch("sync_leads.requests")
-    def test_pull_writes_decoded_content(self, mock_requests):
-        import base64
-        mock_requests.get.return_value = MagicMock(
-            status_code=200, json=lambda: {"content": base64.b64encode(b"company_name,phone\nA,555\n").decode()})
+    def test_pull_writes_raw_content(self, mock_requests):
+        mock_requests.get.return_value = MagicMock(status_code=200, content=b"company_name,phone\nA,555\n")
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "sub" / "leads.csv"
             sync_leads.pull_github(path)
             self.assertEqual(path.read_text(), "company_name,phone\nA,555\n")
+
+    @patch.dict("os.environ", {"GITHUB_TOKEN": "t", "GITHUB_REPO": "me/repo"}, clear=True)
+    @patch("sync_leads.requests")
+    def test_pull_requests_the_raw_media_type_so_files_over_1mb_still_restore(self, mock_requests):
+        # The default JSON envelope's base64 "content" field comes back empty for any file over
+        # 1MB -- the "raw" media type returns the actual bytes directly instead, at any size.
+        big_content = b"company_name,phone\n" + b"A,555\n" * 100_000  # well over 1MB
+        mock_requests.get.return_value = MagicMock(status_code=200, content=big_content)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "leads.csv"
+            sync_leads.pull_github(path)
+            self.assertEqual(path.read_bytes(), big_content)
+        self.assertEqual(mock_requests.get.call_args.kwargs["headers"]["Accept"], "application/vnd.github.raw+json")
 
     @patch.dict("os.environ", {"GITHUB_TOKEN": "t", "GITHUB_REPO": "me/repo"}, clear=True)
     @patch("sync_leads.requests")

@@ -37,6 +37,40 @@ GROUPS = [{"id": str(i + 1), "label": f"{g[0]}–{g[-1]} ({len(g)} states)", "st
 lock = threading.Lock()
 job = {"proc": None, "log": [], "started": False, "scope": "", "states": None, "stopped": False}
 
+# Backing up on every edit used to mean a synchronous GitHub commit + Sheets rewrite inside the
+# request -- typing a 50-character note (saved every 600ms) could fire off several of each. Backups
+# now run on a short delay after the *last* edit instead, so a burst of saves results in at most one
+# push; a failure gets one automatic retry, and the most recent failure (if any) is surfaced via
+# /api/status instead of only ever going to stderr.
+SYNC_DEBOUNCE_SECONDS = 5
+SYNC_RETRY_SECONDS = 30
+backup_state = {"error": None}
+_sync_timer = None
+
+
+def _run_sync():
+    global _sync_timer
+    error = sync_leads.sync(LEADS_PATH)
+    with lock:
+        backup_state["error"] = error
+        _sync_timer = None
+    if error:
+        _schedule_sync(SYNC_RETRY_SECONDS)
+
+
+def _schedule_sync(delay):
+    global _sync_timer
+    with lock:
+        if _sync_timer is not None:
+            _sync_timer.cancel()
+        _sync_timer = threading.Timer(delay, _run_sync)
+        _sync_timer.daemon = True
+        _sync_timer.start()
+
+
+def schedule_sync():
+    _schedule_sync(SYNC_DEBOUNCE_SECONDS)
+
 
 def read_csv(path):
     """All non-rejected leads, each flagged complete (name, phone, email and timezone) or partial,
@@ -125,6 +159,11 @@ def undelete_lead(path, phone):
 # Leads marked with either of these are kept in the UI (for the record) but left out of every
 # export and copy action, so a "do not contact" or declined lead can't accidentally get dialed.
 DO_NOT_EXPORT_STATUSES = {"Not interested", "Do not contact"}
+
+# The only values the "Interested?" dropdown offers -- reusing sync_leads' canonical list (it
+# already has to know these exactly, to lay out the Google Sheet's sections) instead of a second
+# copy that could quietly drift out of sync with it.
+VALID_STATUSES = set(sync_leads.STATUS_SECTIONS)
 
 
 def export_csv(path, which="all"):
@@ -292,7 +331,8 @@ class Handler(BaseHTTPRequestHandler):
                             "failedStates": [] if running else parse_failed_states(job["log"]),
                             "notReachedStates": not_reached,
                             "finishedCount": len(finished),
-                            "plannedCount": len(planned) if planned else None})
+                            "plannedCount": len(planned) if planned else None,
+                            "backupError": backup_state["error"]})
         elif path == "/api/groups":
             self.send_json({"groups": GROUPS})
         elif path == "/api/export.csv":
@@ -325,10 +365,12 @@ class Handler(BaseHTTPRequestHandler):
             updates = {k: data.get(k, "") for k in ("status", "notes") if k in data}
             if not phone or not updates:
                 return self.send_json({"error": "phone and at least one of status/notes are required"}, 400)
+            if "status" in updates and updates["status"] not in VALID_STATUSES:
+                return self.send_json({"error": f"status must be one of {sorted(VALID_STATUSES)}"}, 400)
             with lock:
                 ok = update_lead(LEADS_PATH, phone, updates)
             if ok:
-                sync_leads.sync(LEADS_PATH)
+                schedule_sync()
             return self.send_json({"ok": True}) if ok else self.send_json({"error": "Lead not found"}, 404)
         if path == "/api/lead/delete":
             phone = (data.get("phone") or "").strip()
@@ -337,7 +379,7 @@ class Handler(BaseHTTPRequestHandler):
             with lock:
                 ok = delete_lead(LEADS_PATH, phone)
             if ok:
-                sync_leads.sync(LEADS_PATH)
+                schedule_sync()
             return self.send_json({"ok": True}) if ok else self.send_json({"error": "Lead not found"}, 404)
         if path == "/api/lead/undelete":
             phone = (data.get("phone") or "").strip()
@@ -346,7 +388,7 @@ class Handler(BaseHTTPRequestHandler):
             with lock:
                 ok = undelete_lead(LEADS_PATH, phone)
             if ok:
-                sync_leads.sync(LEADS_PATH)
+                schedule_sync()
             return self.send_json({"ok": True}) if ok else self.send_json({"error": "Lead not found"}, 404)
         self.send_json({"error": "Not found"}, 404)
 

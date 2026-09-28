@@ -1,13 +1,14 @@
 import csv
+import re
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import lead_scraper
-from lead_scraper import (STATE_GROUPS, STATES, clean_email, dedupe_by_phone, element_to_row, is_complete,
-                           is_rejected, missing_fields, load_existing_phones, normalize_phone, run,
-                           website_offers_residential_pickup)
+from lead_scraper import (STATE_GROUPS, STATES, UNREACHABLE_ERROR_MESSAGE, _friendly_error, clean_email,
+                           dedupe_by_phone, element_to_row, is_complete, is_rejected, missing_fields,
+                           load_existing_phones, normalize_phone, run, website_offers_residential_pickup)
 
 
 class NormalizePhoneTests(unittest.TestCase):
@@ -217,6 +218,28 @@ class RequiredFieldsTests(unittest.TestCase):
         self.assertEqual(clean_email(None), "")
 
 
+class FriendlyErrorTests(unittest.TestCase):
+    def test_connection_refused_is_unreachable(self):
+        self.assertEqual(_friendly_error(ConnectionError("Connection refused")), UNREACHABLE_ERROR_MESSAGE)
+
+    def test_timeout_is_distinguished_from_unreachable(self):
+        self.assertEqual(_friendly_error(TimeoutError("timed out")), "the map data source took too long to respond")
+
+    def test_a_403_reads_as_blocked_not_a_generic_temporary_problem(self):
+        # Caught in review: a permanent block (e.g. a proxy/WAF) was described the same as any other
+        # unclassified error ("a temporary problem"), which tells the user to just try again when
+        # that's unlikely to help.
+        error = Exception("403 Client Error: Forbidden for url: https://overpass-api.de/api/interpreter")
+        self.assertEqual(_friendly_error(error), "was blocked from reaching the map data source")
+
+    def test_a_429_reads_as_rate_limited(self):
+        error = Exception("429 Client Error: Too Many Requests")
+        self.assertEqual(_friendly_error(error), "the map data source is rate-limiting requests right now")
+
+    def test_unrecognized_errors_fall_back_to_the_generic_message(self):
+        self.assertEqual(_friendly_error(Exception("something odd")), "the map data source had a temporary problem")
+
+
 class RunResilienceTests(unittest.TestCase):
     """Hit live: a failure past the network fetch (in this case, the backup sync step) crashed the
     whole run instead of just skipping that one state, because only fetch_elements() was wrapped in
@@ -253,6 +276,41 @@ class RunResilienceTests(unittest.TestCase):
                 run(output_path, ["CO"])
         summary_lines = [c.args[0] for c in mock_print.call_args_list if c.args]
         self.assertTrue(any("Failed states (rerun to retry): CO" in line for line in summary_lines), summary_lines)
+
+    def test_aborts_early_after_consecutive_states_cannot_connect_at_all(self):
+        # Reproduced live: with the data source fully unreachable, a 13-state run spent ~25 minutes
+        # grinding through every state one at a time to report the same "can't connect" outcome 13
+        # times. A handful of connection-refused states in a row means the service is unreachable
+        # from here entirely, not just having a rough moment for one state -- stop early instead.
+        with tempfile.TemporaryDirectory() as tmp:
+            output_path = Path(tmp) / "leads.csv"
+            with patch("lead_scraper.fetch_elements", side_effect=ConnectionError("Connection refused")), \
+                 patch.object(lead_scraper.sync_leads, "restore"), \
+                 patch.object(lead_scraper.sync_leads, "sync"), \
+                 patch("lead_scraper.time.sleep"), \
+                 patch("builtins.print") as mock_print:
+                run(output_path, ["AL", "AK", "AZ", "AR"])
+        printed = [c.args[0] for c in mock_print.call_args_list if c.args]
+        state_re = re.compile(r"^(?:\[\d+/\d+\]|still failing after retry:) (\S+): skipped")
+        attempted = {m.group(1) for line in printed for m in [state_re.match(line)] if m}
+        self.assertEqual(attempted, {"AL", "AK"})  # AZ and AR never attempted -- aborted after 2
+        self.assertTrue(any("stopping early" in line for line in printed), printed)
+
+    def test_does_not_abort_early_when_failures_are_not_connection_level(self):
+        # A busy/blocked/slow response is a different situation from "unreachable" -- these must not
+        # trip the same early-abort, or a run would give up after any two ordinary failures.
+        with tempfile.TemporaryDirectory() as tmp:
+            output_path = Path(tmp) / "leads.csv"
+            with patch("lead_scraper.fetch_elements", side_effect=TimeoutError("timed out")), \
+                 patch.object(lead_scraper.sync_leads, "restore"), \
+                 patch.object(lead_scraper.sync_leads, "sync"), \
+                 patch("lead_scraper.time.sleep"), \
+                 patch("builtins.print") as mock_print:
+                run(output_path, ["AL", "AK", "AZ", "AR"])
+        printed = [c.args[0] for c in mock_print.call_args_list if c.args]
+        state_re = re.compile(r"^(?:\[\d+/\d+\]|still failing after retry:) (\S+): skipped")
+        attempted = {m.group(1) for line in printed for m in [state_re.match(line)] if m}
+        self.assertEqual(attempted, {"AL", "AK", "AZ", "AR"})  # all four still get attempted
 
     def test_a_failure_in_the_logging_around_attempt_state_does_not_abort_the_run(self):
         # Hit live: the per-state loop's own print()/log_debug_detail()/sleep() calls sat outside

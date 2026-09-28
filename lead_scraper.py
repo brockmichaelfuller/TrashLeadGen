@@ -342,6 +342,9 @@ def dedupe_by_phone(path):
     return True
 
 
+UNREACHABLE_ERROR_MESSAGE = "couldn't connect to the map data source"
+
+
 def _friendly_error(error):
     """A short, non-technical description of why a state's request failed, for the UI log --
     nobody using the web page needs to see a Python traceback or a raw HTTP error."""
@@ -351,7 +354,13 @@ def _friendly_error(error):
     if "runtime error" in text:
         return "the map data source was too busy to finish this search"
     if any(s in text for s in ("network is unreachable", "connection refused", "newconnectionerror", "connectionerror")):
-        return "couldn't connect to the map data source"
+        return UNREACHABLE_ERROR_MESSAGE
+    # A permanent block (e.g. a proxy/WAF) reads very differently from a busy server -- lumping it
+    # in with "temporary problem" told the user to just try again, when that's unlikely to help.
+    if "403" in text or "forbidden" in text:
+        return "was blocked from reaching the map data source"
+    if "429" in text or "too many requests" in text:
+        return "the map data source is rate-limiting requests right now"
     return "the map data source had a temporary problem"
 
 
@@ -375,6 +384,10 @@ def log_debug_detail(output_path, state, error):
 # pass after a cooldown, instead of leaving that to a person clicking Retry every time.
 RETRY_ROUNDS = 2  # the initial pass, plus this many additional automatic passes over failures
 RETRY_ROUND_DELAY_SECONDS = 30
+
+# This many states in a row failing to even connect (not just slow/busy/blocked) means the data
+# source is unreachable from here entirely, not just having a rough moment -- see its use in run().
+CONSECUTIVE_UNREACHABLE_ABORT_THRESHOLD = 2
 
 
 def _attempt_state(state, writer, out, output_path, seen, today):
@@ -418,6 +431,8 @@ def run(output_path, states):
             writer.writeheader()
 
         remaining = list(states)
+        consecutive_unreachable = 0
+        aborted_early = False
         for round_num in range(1, RETRY_ROUNDS + 1):
             still_failing = []
             for i, state in enumerate(remaining):
@@ -429,6 +444,7 @@ def run(output_path, states):
                     new, error = _attempt_state(state, writer, out, output_path, seen, today)
                     if error is None:
                         total_new += new
+                        consecutive_unreachable = 0
                         label = f"[{i + 1}/{len(remaining)}]" if round_num == 1 else "retry succeeded:"
                         print(f"{label} {state}: {new} new companies")
                     else:
@@ -437,13 +453,31 @@ def run(output_path, states):
                         print(f"{label} {state}: skipped -- {message}", file=sys.stderr)
                         log_debug_detail(output_path, state, error)  # the real exception, for /api/debug.log
                         still_failing.append(state)                  # -- never shown in the user-facing log
+                        consecutive_unreachable = consecutive_unreachable + 1 if message == UNREACHABLE_ERROR_MESSAGE else 0
                     time.sleep(REQUEST_DELAY_SECONDS)
                 except Exception as error:
-                    print(f"{state}: skipped -- the map data source had a temporary problem", file=sys.stderr)
+                    # Same [i/n]-style prefix as the two branches above, so this line matches
+                    # STATE_OUTCOME_RE too -- without it, a state failing here (the logging/sleep
+                    # code, not _attempt_state itself) went missing from the retry button entirely,
+                    # since app.py's parsing only recognized the other two branches' formats.
+                    label = f"[{i + 1}/{len(remaining)}]" if round_num == 1 else "still failing after retry:"
+                    print(f"{label} {state}: skipped -- the map data source had a temporary problem", file=sys.stderr)
                     log_debug_detail(output_path, state, error)
                     still_failing.append(state)
+                    consecutive_unreachable = 0
+                # A handful of states in a row that can't even connect (not just slow/busy/blocked)
+                # means the data source itself is unreachable from here -- grinding through every
+                # remaining state at several minutes each just to report the same thing N more times
+                # helps no one. Whatever's left of this run stays unattempted (shown as "not reached",
+                # the same status a Stop click leaves behind) rather than getting the full retry cycle.
+                if consecutive_unreachable >= CONSECUTIVE_UNREACHABLE_ABORT_THRESHOLD:
+                    print(f"Can't reach the map data service after {consecutive_unreachable} states in a row -- "
+                          "stopping early instead of waiting on the rest. Check the connection and try again.",
+                          file=sys.stderr)
+                    aborted_early = True
+                    break
             remaining = still_failing
-            if not remaining or round_num == RETRY_ROUNDS:
+            if aborted_early or not remaining or round_num == RETRY_ROUNDS:
                 break
             try:
                 print(f"{len(remaining)} state(s) had a temporary problem -- retrying automatically "
