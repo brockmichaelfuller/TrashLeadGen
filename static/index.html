@@ -398,14 +398,28 @@ async function poll() {
   if (s.started) {
     const scope = s.scope || "the entire U.S.";
     let text;
+    const n = outstanding.length, plural = n === 1 ? "" : "s";
     if (s.running) text = `Scraping ${scope}…`;
     else if (s.stopped) {
       text = s.plannedCount
-        ? `Stopped — ${s.finishedCount} of ${s.plannedCount} areas finished.${outstanding.length ? " Continue below." : ""}`
+        ? `Stopped — ${s.finishedCount} of ${s.plannedCount} states finished.${n ? " Continue below." : ""}`
         : "Stopped.";
     }
     else if (s.crashed) text = "Something went wrong and the scrape didn't finish. You can try running it again.";
-    else if (failed.length) text = `Finished scraping ${scope} — ${failed.length} area${failed.length === 1 ? "" : "s"} couldn't be reached. Use Retry below.`;
+    // A run that gave up early (the map data source was blocked or unreachable, not just one bad
+    // state) reads very differently from an ordinary "a couple of states failed" finish -- it means
+    // the whole rest of the run never even got attempted, and retrying immediately won't help until
+    // whatever's actually wrong (a block, or no connection at all) is fixed. This has to be checked
+    // before the plain "failed" case below, since an aborted run also has failedStates set (the
+    // handful of states that triggered the abort) and would otherwise read as that ordinary case.
+    else if (s.abortedEarly) {
+      const cause = s.abortedEarly === "blocked"
+        ? "appears to be blocking requests from this server"
+        : "couldn't be reached at all";
+      text = `Stopped early — the map data source ${cause}. ${n} state${plural} left to retry. `
+        + "See the log below, fix the connection (or whatever's blocking it), then Retry.";
+    }
+    else if (failed.length) text = `Finished scraping ${scope} — ${n} state${plural} couldn't be reached. Use Retry below.`;
     else text = `Finished scraping ${scope}.`;
     $("progressText").textContent = text;
     const frac = s.running ? Math.max(0.06, progressFraction(s.log))

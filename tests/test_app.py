@@ -6,8 +6,8 @@ from unittest.mock import patch
 
 import app
 import db
-from app import (delete_lead, parse_failed_states, parse_finished_states, read_leads, undelete_lead,
-                  update_lead, user_facing_log)
+from app import (delete_lead, parse_failed_states, parse_finished_states, read_leads, run_aborted_early,
+                  undelete_lead, update_lead, user_facing_log)
 
 
 class ParseFailedStatesTests(unittest.TestCase):
@@ -85,6 +85,26 @@ class ParseFinishedStatesTests(unittest.TestCase):
             "retry succeeded: CO: 0 new companies",
         ]
         self.assertEqual(parse_finished_states(log), ["CO"])
+
+
+class RunAbortedEarlyTests(unittest.TestCase):
+    def test_none_for_a_normal_run(self):
+        log = ["[1/1] CO: 4 new companies", "Done. 4 new rows -> output/leads.db (4 total unique phones)"]
+        self.assertIsNone(run_aborted_early(log))
+
+    def test_blocked_when_every_mirror_returned_403(self):
+        log = ["[1/4] AL: skipped -- was blocked from reaching the map data source",
+               "[2/4] AK: skipped -- was blocked from reaching the map data source",
+               "Can't reach the map data service after 2 states in a row -- stopping early instead "
+               "of waiting on the rest (blocked from reaching it). Check the connection (or "
+               "whatever's blocking it) and try again."]
+        self.assertEqual(run_aborted_early(log), "blocked")
+
+    def test_unreachable_when_the_connection_is_refused(self):
+        log = ["Can't reach the map data service after 2 states in a row -- stopping early instead "
+               "of waiting on the rest (unable to reach it). Check the connection (or whatever's "
+               "blocking it) and try again."]
+        self.assertEqual(run_aborted_early(log), "unreachable")
 
 
 class UserFacingLogTests(unittest.TestCase):

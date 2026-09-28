@@ -183,6 +183,22 @@ def parse_failed_states(log_lines):
     return [state for state in order if failed[state]]
 
 
+_ABORT_LINE_RE = re.compile(r"^Can't reach the map data service.*\((blocked from reaching|unable to reach) it\)")
+
+
+def run_aborted_early(log_lines):
+    """Whether lead_scraper.py's run() gave up early instead of finishing its planned states --
+    see CONSECUTIVE_PERSISTENT_FAILURE_ABORT_THRESHOLD. This is the one situation where a run that
+    neither crashed nor was stopped by the user still leaves states unattempted, so the page can
+    give it a headline of its own instead of reading like an ordinary "some states failed" finish.
+    Returns "blocked" or "unreachable", or None if the run didn't abort early."""
+    for line in log_lines:
+        match = _ABORT_LINE_RE.match(line)
+        if match:
+            return "blocked" if match.group(1).startswith("blocked") else "unreachable"
+    return None
+
+
 def parse_finished_states(log_lines):
     """States lead_scraper.py has logged any outcome for so far (success or skip), in the order
     first seen. Used to tell which of a run's planned states were actually reached before it ended
@@ -209,7 +225,10 @@ def start_run(group_id="all", explicit_states=None):
     """One scrape: the whole U.S., one ~13-state group, or (for the "retry failed" button) an
     explicit list of state codes."""
     if explicit_states:
-        states, label = [s.upper() for s in explicit_states], f"retry: {', '.join(explicit_states)}"
+        states = [s.upper() for s in explicit_states]
+        # "retry: RI, CT, DE" (the raw scope value) used to show up verbatim in the page's headline
+        # as "Scraping retry: RI, CT, DE…" -- this reads like an internal label, not a sentence.
+        label = f"{len(states)} state{'' if len(states) == 1 else 's'} ({', '.join(states)})"
     else:
         group = next((g for g in GROUPS if g["id"] == group_id), None)
         if group_id and group_id != "all" and not group:
@@ -363,6 +382,7 @@ class Handler(BaseHTTPRequestHandler):
                             "stopped": job["stopped"], "crashed": crashed,
                             "failedStates": [] if running else parse_failed_states(job["log"]),
                             "notReachedStates": not_reached,
+                            "abortedEarly": None if running else run_aborted_early(job["log"]),
                             "finishedCount": len(finished),
                             "plannedCount": len(planned) if planned else None,
                             "backupError": backup_state["error"]})
