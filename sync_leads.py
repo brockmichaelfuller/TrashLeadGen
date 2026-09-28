@@ -139,14 +139,24 @@ def push_github(local_path):
         return
     headers = {"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"}
     url = f"{GITHUB_API}/repos/{repo}/contents/{GITHUB_CSV_PATH}"
+    content = base64.b64encode(local_path.read_bytes()).decode()
     try:
-        existing = requests.get(url, headers=headers, timeout=15)
-        body = {"message": "Update scraped leads", "content": base64.b64encode(local_path.read_bytes()).decode()}
-        if existing.status_code == 200:
-            body["sha"] = existing.json()["sha"]
-        response = requests.put(url, headers=headers, json=body, timeout=15)
-        if response.status_code not in (200, 201):
-            _warn("GitHub push", f"HTTP {response.status_code}: {response.text[:200]}")
+        # The scraper subprocess and the web app's own debounce timer can each call this
+        # independently, so two pushes can genuinely race: both read the same starting sha, and
+        # whichever PUTs second gets a 409 (sha now stale) even though its content is still valid
+        # to commit. One retry -- re-reading the sha the other push just created -- covers that
+        # ordinary case without piling on indefinitely for a real, persistent conflict.
+        for attempt in range(2):
+            existing = requests.get(url, headers=headers, timeout=15)
+            body = {"message": "Update scraped leads", "content": content}
+            if existing.status_code == 200:
+                body["sha"] = existing.json()["sha"]
+            response = requests.put(url, headers=headers, json=body, timeout=15)
+            if response.status_code in (200, 201):
+                return
+            if response.status_code != 409 or attempt == 1:
+                _warn("GitHub push", f"HTTP {response.status_code}: {response.text[:200]}")
+                return
     except requests.RequestException as error:
         _warn("GitHub push", error)
 

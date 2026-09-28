@@ -2,6 +2,7 @@ import csv
 import json
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -207,6 +208,45 @@ class CsvBridgeTests(unittest.TestCase):
             db_path, csv_path = Path(tmp) / "leads.db", Path(tmp) / "missing.csv"
             db.import_from_csv(db_path, csv_path)  # must not raise
             self.assertTrue(db.is_empty(db_path))
+
+    def test_concurrent_exports_never_leave_a_reader_seeing_a_partial_file(self):
+        # The scraper subprocess (after every state) and the web app (on its debounce timer, after
+        # an edit) each call export_to_csv independently, so two exports to the same path can
+        # genuinely overlap -- a reader (sync_leads pushing this file) must never be able to see a
+        # half-written one. export_to_csv writes to a temp file and renames it into place instead of
+        # truncating the target in place, so a concurrent read of csv_path always gets either the
+        # complete old file or the complete new one, never something in between.
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path, csv_path = Path(tmp) / "leads.db", Path(tmp) / "leads.csv"
+            row_count = 30
+            for i in range(row_count):
+                db.insert_if_new(db_path, {"phone": str(i), "company_name": f"Co {i}"})
+
+            stop = threading.Event()
+            bad_reads = []
+
+            def exporter():
+                while not stop.is_set():
+                    db.export_to_csv(db_path, csv_path)
+
+            def reader():
+                while not stop.is_set():
+                    try:
+                        with csv_path.open(newline="", encoding="utf-8") as f:
+                            rows = list(csv.reader(f))
+                    except FileNotFoundError:
+                        continue
+                    if len(rows) not in (0, row_count + 1):  # +1 for the header
+                        bad_reads.append(len(rows))
+
+            threads = [threading.Thread(target=exporter) for _ in range(4)] + [threading.Thread(target=reader) for _ in range(4)]
+            for t in threads:
+                t.start()
+            time.sleep(0.5)
+            stop.set()
+            for t in threads:
+                t.join(timeout=5)
+            self.assertEqual(bad_reads, [])
 
 
 class IsEmptyTests(unittest.TestCase):

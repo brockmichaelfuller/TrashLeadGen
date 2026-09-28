@@ -12,7 +12,9 @@ has to know the local store changed.
 """
 import csv
 import json
+import os
 import sqlite3
+import threading
 from datetime import date
 from pathlib import Path
 
@@ -141,15 +143,22 @@ def import_audit_log_rejections(db_path):
 
 
 def export_to_csv(db_path, csv_path):
-    """Snapshot the whole table to a CSV -- this is what sync_leads.py backs up and restores."""
+    """Snapshot the whole table to a CSV -- this is what sync_leads.py backs up and restores.
+    Both the web app (on a debounce timer, after an edit) and the scraper subprocess (after every
+    state) call this independently, so two exports can genuinely overlap. Written to a temp file
+    and atomically renamed into place rather than truncated-and-rewritten in place, so a concurrent
+    reader (sync_leads pushing this same path) can never see a half-written file -- os.replace is
+    atomic on the same filesystem, and the temp file lives right next to the target for that."""
     with connect(db_path) as conn:
         rows = conn.execute("SELECT * FROM leads ORDER BY rowid").fetchall()
     csv_path.parent.mkdir(parents=True, exist_ok=True)
-    with csv_path.open("w", newline="", encoding="utf-8") as f:
+    tmp_path = csv_path.with_name(f".{csv_path.name}.tmp-{os.getpid()}-{threading.get_ident()}")
+    with tmp_path.open("w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=COLUMNS)
         writer.writeheader()
         for row in rows:
             writer.writerow({c: row[c] for c in COLUMNS})
+    os.replace(tmp_path, csv_path)
 
 
 def import_from_csv(db_path, csv_path):

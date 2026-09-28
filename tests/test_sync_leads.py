@@ -79,6 +79,38 @@ class GitHubEnabledTests(unittest.TestCase):
 
     @patch.dict("os.environ", {"GITHUB_TOKEN": "t", "GITHUB_REPO": "me/repo"}, clear=True)
     @patch("sync_leads.requests")
+    def test_push_retries_once_on_a_409_sha_conflict(self, mock_requests):
+        # The scraper subprocess and the web app's debounce timer can each push independently --
+        # whichever loses that race gets a 409 (its sha is now stale) purely from bad timing, not
+        # because its content was actually invalid. Re-reading the sha and retrying once covers it.
+        mock_requests.get.side_effect = [
+            MagicMock(status_code=200, json=lambda: {"sha": "stale"}),
+            MagicMock(status_code=200, json=lambda: {"sha": "fresh"}),
+        ]
+        mock_requests.put.side_effect = [MagicMock(status_code=409, text="conflict"), MagicMock(status_code=200)]
+        sync_leads.last_backup_error = None  # isolate from whatever an earlier test in the run left behind
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "leads.csv"
+            path.write_text("company_name,phone\nA,555\n")
+            sync_leads.push_github(path)
+        self.assertEqual(mock_requests.put.call_count, 2)
+        self.assertEqual(mock_requests.put.call_args.kwargs["json"]["sha"], "fresh")
+        self.assertIsNone(sync_leads.last_backup_error)
+
+    @patch.dict("os.environ", {"GITHUB_TOKEN": "t", "GITHUB_REPO": "me/repo"}, clear=True)
+    @patch("sync_leads.requests")
+    def test_push_reports_a_409_that_does_not_clear_on_retry(self, mock_requests):
+        mock_requests.get.return_value = MagicMock(status_code=200, json=lambda: {"sha": "stale"})
+        mock_requests.put.return_value = MagicMock(status_code=409, text="still conflicting")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "leads.csv"
+            path.write_text("company_name,phone\nA,555\n")
+            sync_leads.push_github(path)
+        self.assertEqual(mock_requests.put.call_count, 2)  # one retry, then gives up
+        self.assertIn("409", sync_leads.last_backup_error)
+
+    @patch.dict("os.environ", {"GITHUB_TOKEN": "t", "GITHUB_REPO": "me/repo"}, clear=True)
+    @patch("sync_leads.requests")
     def test_push_skips_a_missing_file(self, mock_requests):
         sync_leads.push_github(Path("/nonexistent/leads.csv"))
         mock_requests.get.assert_not_called()
