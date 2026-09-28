@@ -296,9 +296,30 @@ class RunResilienceTests(unittest.TestCase):
         self.assertEqual(attempted, {"AL", "AK"})  # AZ and AR never attempted -- aborted after 2
         self.assertTrue(any("stopping early" in line for line in printed), printed)
 
-    def test_does_not_abort_early_when_failures_are_not_connection_level(self):
-        # A busy/blocked/slow response is a different situation from "unreachable" -- these must not
-        # trip the same early-abort, or a run would give up after any two ordinary failures.
+    def test_aborts_early_when_every_mirror_returns_403(self):
+        # Reproduced live: with every Overpass mirror returning 403, a 2-state run still took 517s
+        # to finish -- "blocked" wasn't covered by the early-abort, only "can't connect" was, so it
+        # ran the full retry-round gauntlet before admitting nothing worked. A block is exactly as
+        # unrecoverable-by-waiting as being unreachable, and needs the same early stop.
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "leads.db"
+            with patch("lead_scraper.fetch_elements", side_effect=RuntimeError("403 Client Error: Forbidden")), \
+                 patch.object(db.sync_leads, "restore"), \
+                 patch.object(db.sync_leads, "sync"), \
+                 patch("lead_scraper.time.sleep"), \
+                 patch("builtins.print") as mock_print:
+                run(db_path, ["AL", "AK", "AZ", "AR"])
+        printed = [c.args[0] for c in mock_print.call_args_list if c.args]
+        state_re = re.compile(r"^(?:\[\d+/\d+\]|still failing after retry:) (\S+): skipped")
+        attempted = {m.group(1) for line in printed for m in [state_re.match(line)] if m}
+        self.assertEqual(attempted, {"AL", "AK"})  # AZ and AR never attempted -- aborted after 2
+        self.assertTrue(any("stopping early" in line for line in printed), printed)
+        # Never framed as something a wait-and-retry would fix.
+        self.assertFalse(any("temporary" in line.lower() for line in printed), printed)
+
+    def test_does_not_abort_early_for_an_ordinary_slow_or_busy_response(self):
+        # A slow/busy response usually clears on its own -- this must not trip the same early-abort
+        # as "unreachable"/"blocked" do, or a run would give up after any two ordinary failures.
         with tempfile.TemporaryDirectory() as tmp:
             db_path = Path(tmp) / "leads.db"
             with patch("lead_scraper.fetch_elements", side_effect=TimeoutError("timed out")), \

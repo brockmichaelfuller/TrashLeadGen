@@ -284,6 +284,14 @@ def fetch_elements(state_code):
 
 
 UNREACHABLE_ERROR_MESSAGE = "couldn't connect to the map data source"
+BLOCKED_ERROR_MESSAGE = "was blocked from reaching the map data source"
+
+# Failures that won't clear just by waiting and retrying -- a network that refuses every connection
+# or a firewall/proxy block isn't a busy server having a rough moment, and grinding through the rest
+# of a run at several minutes a state to keep reporting the same thing helps no one. See run()'s use
+# of this alongside CONSECUTIVE_UNREACHABLE_ABORT_THRESHOLD, and _friendly_error's wording -- neither
+# of these two ever gets called "temporary".
+PERSISTENT_ERROR_MESSAGES = {UNREACHABLE_ERROR_MESSAGE, BLOCKED_ERROR_MESSAGE}
 
 
 def _friendly_error(error):
@@ -299,7 +307,7 @@ def _friendly_error(error):
     # A permanent block (e.g. a proxy/WAF) reads very differently from a busy server -- lumping it
     # in with "temporary problem" told the user to just try again, when that's unlikely to help.
     if "403" in text or "forbidden" in text:
-        return "was blocked from reaching the map data source"
+        return BLOCKED_ERROR_MESSAGE
     if "429" in text or "too many requests" in text:
         return "the map data source is rate-limiting requests right now"
     return "the map data source had a temporary problem"
@@ -331,9 +339,13 @@ def log_debug_detail(output_path, state, error):
 RETRY_ROUNDS = 3  # total passes over a state before giving up on it, including the initial one
 RETRY_ROUND_DELAY_SECONDS = 90
 
-# This many states in a row failing to even connect (not just slow/busy/blocked) means the data
-# source is unreachable from here entirely, not just having a rough moment -- see its use in run().
-CONSECUTIVE_UNREACHABLE_ABORT_THRESHOLD = 2
+# This many states in a row failing with a PERSISTENT_ERROR_MESSAGES outcome (can't connect at all,
+# or blocked/forbidden) means the problem won't clear by waiting -- not just a busy server having a
+# rough moment -- see its use in run(). Hit live: with every mirror returning 403, a 2-state run
+# still took 517s to finish because a block wasn't covered by this, only "can't connect" was; a
+# 13-state group would have taken about 35 minutes, "Entire U.S." about 2.5 hours, before the page
+# admitted nothing worked.
+CONSECUTIVE_PERSISTENT_FAILURE_ABORT_THRESHOLD = 2
 
 
 def _attempt_state(state, db_path, seen, today):
@@ -377,8 +389,8 @@ def run(db_path, states):
     total_new = 0
 
     remaining = list(states)
-    consecutive_unreachable = 0
-    aborted_early = False
+    consecutive_persistent = 0
+    abort_reason = None
     for round_num in range(1, RETRY_ROUNDS + 1):
         still_failing = []
         for i, state in enumerate(remaining):
@@ -390,7 +402,7 @@ def run(db_path, states):
                 new, error = _attempt_state(state, db_path, seen, today)
                 if error is None:
                     total_new += new
-                    consecutive_unreachable = 0
+                    consecutive_persistent = 0
                     label = f"[{i + 1}/{len(remaining)}]" if round_num == 1 else "retry succeeded:"
                     print(f"{label} {state}: {new} new companies")
                 else:
@@ -399,7 +411,7 @@ def run(db_path, states):
                     print(f"{label} {state}: skipped -- {message}", file=sys.stderr)
                     log_debug_detail(db_path, state, error)  # the real exception, for /api/debug.log
                     still_failing.append(state)              # -- never shown in the user-facing log
-                    consecutive_unreachable = consecutive_unreachable + 1 if message == UNREACHABLE_ERROR_MESSAGE else 0
+                    consecutive_persistent = consecutive_persistent + 1 if message in PERSISTENT_ERROR_MESSAGES else 0
                 time.sleep(REQUEST_DELAY_SECONDS)
             except Exception as error:
                 # Same [i/n]-style prefix as the two branches above, so this line matches
@@ -410,20 +422,23 @@ def run(db_path, states):
                 print(f"{label} {state}: skipped -- the map data source had a temporary problem", file=sys.stderr)
                 log_debug_detail(db_path, state, error)
                 still_failing.append(state)
-                consecutive_unreachable = 0
-            # A handful of states in a row that can't even connect (not just slow/busy/blocked)
-            # means the data source itself is unreachable from here -- grinding through every
-            # remaining state at several minutes each just to report the same thing N more times
-            # helps no one. Whatever's left of this run stays unattempted (shown as "not reached",
-            # the same status a Stop click leaves behind) rather than getting the full retry cycle.
-            if consecutive_unreachable >= CONSECUTIVE_UNREACHABLE_ABORT_THRESHOLD:
-                print(f"Can't reach the map data service after {consecutive_unreachable} states in a row -- "
-                      "stopping early instead of waiting on the rest. Check the connection and try again.",
-                      file=sys.stderr)
-                aborted_early = True
+                consecutive_persistent = 0
+            # A handful of states in a row failing in a way that won't clear by waiting (can't
+            # connect at all, or blocked/forbidden -- see PERSISTENT_ERROR_MESSAGES) means the
+            # problem is with reaching the data source itself, not a busy server -- grinding through
+            # every remaining state at several minutes each just to report the same thing N more
+            # times helps no one. Whatever's left of this run stays unattempted (shown as "not
+            # reached", the same status a Stop click leaves behind) rather than getting the full
+            # retry cycle.
+            if consecutive_persistent >= CONSECUTIVE_PERSISTENT_FAILURE_ABORT_THRESHOLD:
+                abort_reason = message
+                verb = "blocked from reaching" if message == BLOCKED_ERROR_MESSAGE else "unable to reach"
+                print(f"Can't reach the map data service after {consecutive_persistent} states in a row -- "
+                      f"stopping early instead of waiting on the rest ({verb} it). Check the connection "
+                      "(or whatever's blocking it) and try again.", file=sys.stderr)
                 break
         remaining = still_failing
-        if aborted_early or not remaining or round_num == RETRY_ROUNDS:
+        if abort_reason or not remaining or round_num == RETRY_ROUNDS:
             break
         try:
             print(f"{len(remaining)} state(s) had a temporary problem -- retrying automatically "
