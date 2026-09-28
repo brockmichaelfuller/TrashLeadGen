@@ -75,6 +75,8 @@
   .cellwrap { display: flex; align-items: center; gap: 6px; }
   .saved-tag { color: var(--accent); font-size: 11px; font-weight: 600; opacity: 0; transition: opacity .25s; white-space: nowrap; }
   .saved-tag.show { opacity: 1; }
+  .row-err { color: var(--danger); font-size: 11px; font-weight: 600; opacity: 0; transition: opacity .25s; white-space: normal; }
+  .row-err.show { opacity: 1; }
   tr.excluded { opacity: .5; }
   th { color: var(--muted); font-weight: 600; font-size: 12px; cursor: pointer; user-select: none; }
   th:hover { color: var(--text); }
@@ -147,6 +149,7 @@
     <div class="undoBar" id="undoBar" hidden>
       <span id="undoText"></span>
       <button type="button" class="link" id="undoBtn">Undo</button>
+      <span class="row-err" id="undoErr"></span>
     </div>
     <div class="stats">
       <div class="stat"><b id="statTotal">0</b><span>total</span></div>
@@ -218,6 +221,22 @@ function flashSaved(tag) {
   tag._hideTimer = setTimeout(() => tag.classList.remove("show"), 1500);
 }
 
+function errorTag() {
+  const span = document.createElement("span");
+  span.className = "row-err";
+  return span;
+}
+
+// A failed save/remove used to only ever show up in the single #err line inside the Scrape card,
+// which can be scrolled well away from the row it actually happened to. Shown right next to
+// whatever failed instead, same as the "Saved" tag it sits beside.
+function flashRowError(tag, message) {
+  tag.textContent = message;
+  tag.classList.add("show");
+  clearTimeout(tag._hideTimer);
+  tag._hideTimer = setTimeout(() => { tag.classList.remove("show"); tag.textContent = ""; }, 5000);
+}
+
 const DO_NOT_EXPORT = new Set(["Not interested", "Do not contact"]);
 
 function statusCell(l) {
@@ -231,13 +250,13 @@ function statusCell(l) {
     sel.append(new Option(label, value));
   }
   sel.value = l.status || "";
-  const tag = savedTag();
+  const tag = savedTag(), err = errorTag();
   sel.onchange = async () => {
     l.status = sel.value;
     try { await saveLead(l.phone, { status: sel.value }); flashSaved(tag); renderLeads(); }
-    catch (e) { $("err").textContent = e.message; }
+    catch (e) { flashRowError(err, e.message); }
   };
-  wrap.append(sel, tag);
+  wrap.append(sel, tag, err);
   td.append(wrap);
   return td;
 }
@@ -253,16 +272,16 @@ function notesCell(l) {
   inp.placeholder = "What happened when we called…";
   inp.setAttribute("aria-label", `Notes for ${l.company_name || l.phone}`);
   inp.value = l.notes || "";
-  const tag = savedTag();
+  const tag = savedTag(), err = errorTag();
   const doSave = debounce(async () => {
     try { await saveLead(l.phone, { notes: inp.value }); flashSaved(tag); }
-    catch (e) { $("err").textContent = e.message; }
+    catch (e) { flashRowError(err, e.message); }
   }, 600);
   // Saves as you type (debounced so it's not a request per keystroke), and immediately on blur so
   // clicking away right after typing doesn't lose the last half-second of edits.
   inp.oninput = () => { l.notes = inp.value; doSave(); };
   inp.onblur = () => doSave.flush();
-  wrap.append(inp, tag);
+  wrap.append(inp, tag, err);
   td.append(wrap);
   return td;
 }
@@ -273,10 +292,12 @@ function showUndo(l) {
   bar.hidden = false;
   $("undoText").textContent = `Removed "${l.company_name || l.phone}" as not a trash hauler.`;
   $("undoBtn").onclick = async () => {
-    clearTimeout(bar._hideTimer);
-    bar.hidden = true;
-    try { await api("/api/lead/undelete", { phone: l.phone }); await loadLeads(); }
-    catch (e) { $("err").textContent = e.message; }
+    try {
+      await api("/api/lead/undelete", { phone: l.phone });
+      clearTimeout(bar._hideTimer);
+      bar.hidden = true;
+      await loadLeads();
+    } catch (e) { flashRowError($("undoErr"), e.message); }  // leave the bar up so Undo can be retried
   };
   bar._hideTimer = setTimeout(() => { bar.hidden = true; }, 8000);
 }
@@ -284,22 +305,39 @@ function showUndo(l) {
 function removeCell(l) {
   const td = document.createElement("td");
   const btn = document.createElement("button");
+  const name = l.company_name || l.phone;
+  const label = `Remove ${name} as not a residential trash hauler`;
   btn.type = "button";
   btn.className = "danger removeBtn";
   btn.textContent = "Remove";
-  btn.title = `Mark "${l.company_name || l.phone}" as not a residential trash hauler`;
-  btn.setAttribute("aria-label", `Remove ${l.company_name || l.phone} as not a residential trash hauler`);
+  btn.title = `Mark "${name}" as not a residential trash hauler`;
+  btn.setAttribute("aria-label", label);
+  const err = errorTag();
+  // A native confirm() dialog reads like the browser interrupting, not the page -- an inline
+  // click-to-confirm on the button itself (reverting on its own after a few seconds, same pattern
+  // Undo already uses) matches the rest of the page's design instead.
+  let confirming = false, resetTimer = null;
+  const reset = () => { confirming = false; btn.textContent = "Remove"; btn.setAttribute("aria-label", label); };
   btn.onclick = async () => {
-    const name = l.company_name || l.phone;
-    if (!confirm(`Remove "${name}"? This marks it as not a residential trash hauler, so it stays off future scrapes too. You can undo this for a few seconds after.`)) return;
+    if (!confirming) {
+      confirming = true;
+      btn.textContent = "Confirm remove?";
+      btn.setAttribute("aria-label", `Confirm: ${label}. Marks it as not a residential trash hauler, ` +
+        "so it stays off future scrapes too. You can undo this for a few seconds after.");
+      clearTimeout(resetTimer);
+      resetTimer = setTimeout(reset, 4000);
+      return;
+    }
+    clearTimeout(resetTimer);
+    reset();
     try {
       await api("/api/lead/delete", { phone: l.phone });
       leads = leads.filter(x => x.phone !== l.phone);
       renderLeads();
       showUndo(l);
-    } catch (e) { $("err").textContent = e.message; }
+    } catch (e) { flashRowError(err, e.message); }
   };
-  td.append(btn);
+  td.append(btn, err);
   return td;
 }
 
