@@ -86,13 +86,15 @@
       "company": "Rush Refuse Systems",
       "verdict": "deleted",
       "reviewed_at": "2026-09-23",
-      "reason": "refuse truck dealer"
+      "reason": "refuse truck dealer",
+      "redeleted_at": "2026-09-28"
     },
     "(972) 971-5092": {
       "company": "Green Cart Waste & Recycling",
       "verdict": "deleted",
       "reviewed_at": "2026-09-23",
-      "reason": "valet/bulk trash for multifamily, cleanouts"
+      "reason": "valet/bulk trash for multifamily, cleanouts",
+      "redeleted_at": "2026-09-28"
     },
     "(281) 313-2378": {
       "company": "Best Trash",
@@ -461,6 +463,12 @@
       "company": "Grizzily Disposal & Recycling",
       "verdict": "kept",
       "reviewed_at": "2026-09-23"
+    },
+    "(508) 760-6230": {
+      "company": "Dennis Town Disposal Area",
+      "verdict": "deleted",
+      "reviewed_at": "2026-09-28",
+      "reason": "town-run disposal facility (town.dennis.ma.us)"
     }
   }
 }
