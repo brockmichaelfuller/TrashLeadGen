@@ -16,9 +16,10 @@ import re
 import subprocess
 import sys
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, urlparse
 
 ROOT = Path(__file__).parent
 sys.path.insert(0, str(ROOT))
@@ -278,20 +279,86 @@ def is_authorized(header):
     return hmac.compare_digest(supplied.encode(), password.encode()) and user_ok
 
 
+# Failed-auth rate limiting -- once HOST is public (0.0.0.0), APP_PASSWORD is the only thing between
+# the internet and this app, and Basic Auth has no built-in lockout, so nothing previously stopped an
+# unlimited-speed password guess loop. Simple in-memory per-IP tracking; fine for a single instance.
+RATE_LIMIT_MAX_FAILURES = 8
+RATE_LIMIT_WINDOW_SECONDS = 60
+RATE_LIMIT_LOCKOUT_SECONDS = 60
+_auth_failures = {}  # ip -> [failure timestamps within the window]
+_auth_lock = threading.Lock()
+
+
+def _is_rate_limited(ip):
+    now = time.time()
+    with _auth_lock:
+        failures = [t for t in _auth_failures.get(ip, []) if now - t < RATE_LIMIT_WINDOW_SECONDS]
+        _auth_failures[ip] = failures
+        return len(failures) >= RATE_LIMIT_MAX_FAILURES and now - failures[-1] < RATE_LIMIT_LOCKOUT_SECONDS
+
+
+def _record_auth_failure(ip):
+    with _auth_lock:
+        _auth_failures.setdefault(ip, []).append(time.time())
+
+
+def _record_auth_success(ip):
+    with _auth_lock:
+        _auth_failures.pop(ip, None)
+
+
+def request_origin_is_trusted(headers, host):
+    """CSRF defense for state-changing (POST) requests: Basic Auth credentials, once entered, are
+    cached by the browser and resent automatically to the same origin -- including from a background
+    request a *different*, malicious site makes the visitor's browser send. Reject a POST whose
+    Origin/Referer names a different host than the one serving this request; allow it (fail open)
+    when neither header is present, since not every legitimate API client sends them."""
+    origin = headers.get("Origin")
+    referer = headers.get("Referer")
+    for value in (origin, referer):
+        if not value:
+            continue
+        try:
+            netloc = urlparse(value).netloc
+        except ValueError:
+            return False
+        if netloc and netloc != host:
+            return False
+    return True
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         pass
 
     def require_auth(self):
+        ip = self.client_address[0]
+        if _is_rate_limited(ip):
+            self.send_body(b"Too many failed attempts. Try again in a minute.", "text/plain", 429)
+            return False
         if is_authorized(self.headers.get("Authorization")):
+            _record_auth_success(ip)
             return True
+        if os.environ.get("APP_PASSWORD"):  # only meaningful (and only worth counting) once a password is set
+            _record_auth_failure(ip)
         self.send_body(b"Password required", "text/plain", 401, {"WWW-Authenticate": 'Basic realm="TrashLeadGen"'})
+        return False
+
+    def require_trusted_origin(self):
+        if request_origin_is_trusted(self.headers, self.headers.get("Host", "")):
+            return True
+        self.send_body(b"Cross-site request blocked", "text/plain", 403)
         return False
 
     def send_body(self, body, content_type, status=200, extra=None):
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
+        # Baseline hardening: this page is never meant to be framed, sniffed into an unintended
+        # content type, or to leak its (auth-bearing) URL via the Referer header on outbound links.
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header("Referrer-Policy", "no-referrer")
         for k, v in (extra or {}).items():
             self.send_header(k, v)
         self.end_headers()
@@ -348,6 +415,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         if not self.require_auth():
+            return
+        if not self.require_trusted_origin():
             return
         path = self.path.split("?")[0]
         data = self.read_json()

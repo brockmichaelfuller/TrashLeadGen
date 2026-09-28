@@ -43,6 +43,8 @@ class ServerTestCase(unittest.TestCase):
                               "notes": "already said no", "rejected_at": ""})
         with app.lock:
             app.job.update(proc=None, log=[], started=False, scope="", states=None, stopped=False)
+        with app._auth_lock:
+            app._auth_failures.clear()
 
     def request(self, method, path, body=None, headers=None):
         conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
@@ -169,6 +171,58 @@ class StatusEndpointTests(ServerTestCase):
         self.assertEqual(body["started"], False)
         self.assertEqual(body["failedStates"], [])
         self.assertEqual(body["notReachedStates"], [])
+
+
+class SecurityHeaderTests(ServerTestCase):
+    def test_responses_carry_baseline_hardening_headers(self):
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
+        try:
+            conn.request("GET", "/api/leads")
+            resp = conn.getresponse()
+            resp.read()
+            self.assertEqual(resp.getheader("X-Content-Type-Options"), "nosniff")
+            self.assertEqual(resp.getheader("X-Frame-Options"), "DENY")
+            self.assertEqual(resp.getheader("Referrer-Policy"), "no-referrer")
+        finally:
+            conn.close()
+
+
+class CsrfProtectionTests(ServerTestCase):
+    def test_a_post_with_a_mismatched_origin_is_blocked(self):
+        status, _ = self.request("POST", "/api/lead", body={"phone": "111", "status": "Interested"},
+                                  headers={"Origin": "https://evil.example"})
+        self.assertEqual(status, 403)
+        _, leads = self.get_json("/api/leads")
+        self.assertEqual(next(l for l in leads if l["phone"] == "111")["status"], "")
+
+    def test_a_post_with_a_matching_origin_succeeds(self):
+        status, _ = self.request("POST", "/api/lead", body={"phone": "111", "status": "Interested"},
+                                  headers={"Origin": f"http://127.0.0.1:{self.port}"})
+        self.assertEqual(status, 200)
+
+    def test_a_post_with_no_origin_or_referer_is_allowed(self):
+        # Not every legitimate API client sends these headers -- this check only rejects a request
+        # that actively names a different origin, it doesn't require one to be present.
+        status, _ = self.post_json("/api/lead", {"phone": "111", "status": "Interested"})
+        self.assertEqual(status, 200)
+
+
+class AuthRateLimitTests(ServerTestCase):
+    @patch.dict("os.environ", {"APP_PASSWORD": "secret"}, clear=False)
+    def test_locks_out_after_repeated_failed_attempts(self):
+        for _ in range(app.RATE_LIMIT_MAX_FAILURES):
+            status, _ = self.request("GET", "/api/leads", headers={"Authorization": "Basic bm9wZTpub3Blbg=="})
+            self.assertEqual(status, 401)
+        status, _ = self.request("GET", "/api/leads", headers={"Authorization": "Basic bm9wZTpub3Blbg=="})
+        self.assertEqual(status, 429)
+
+    @patch.dict("os.environ", {"APP_PASSWORD": "secret"}, clear=False)
+    def test_a_correct_password_is_not_rate_limited(self):
+        import base64
+        creds = base64.b64encode(b"anyone:secret").decode()
+        for _ in range(app.RATE_LIMIT_MAX_FAILURES + 2):
+            status, _ = self.request("GET", "/api/leads", headers={"Authorization": f"Basic {creds}"})
+            self.assertEqual(status, 200)
 
 
 if __name__ == "__main__":
