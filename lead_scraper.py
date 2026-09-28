@@ -8,6 +8,7 @@ to a single CSV, deduped by phone number.
 import argparse
 import contextlib
 import csv
+import concurrent.futures
 import fcntl
 import re
 import sys
@@ -230,7 +231,8 @@ QUALIFYING_SERVICE_PHRASES = [
     "weekly collection", "weekly trash pickup", "weekly pick-up", "weekly pickup",
 ]
 WEBSITE_CHECK_TIMEOUT_SECONDS = 10
-WEBSITE_CHECK_MAX_CHARS = 300_000  # plenty for a marketing homepage; keeps a huge page from stalling the regex
+WEBSITE_CHECK_MAX_BYTES = 300_000  # plenty for a marketing homepage; keeps a huge page from stalling the regex
+WEBSITE_CHECK_CONCURRENCY = 5  # candidates with a website are checked this many at a time, not one by one
 
 
 def website_offers_residential_pickup(website):
@@ -241,9 +243,23 @@ def website_offers_residential_pickup(website):
     reviewing the list, and a network hiccup here should never cost a real lead."""
     if not website:
         return True
+    if not re.match(r"^https?://", website, re.I):
+        # A bare "example.com" (no scheme) used to raise requests' MissingSchema, which the broad
+        # except below quietly turned into "kept unverified" -- so these were never actually checked.
+        website = f"https://{website}"
     try:
-        response = requests.get(website, timeout=WEBSITE_CHECK_TIMEOUT_SECONDS, headers={"User-Agent": USER_AGENT})
-        text = re.sub(r"<[^>]+>", " ", response.text[:WEBSITE_CHECK_MAX_CHARS]).lower()
+        # Streamed and capped instead of pulling the whole response into memory first -- a large
+        # page (some CMS homepages run several MB) no longer has to fully download before the first
+        # WEBSITE_CHECK_MAX_BYTES are all this ever looks at.
+        response = requests.get(website, timeout=WEBSITE_CHECK_TIMEOUT_SECONDS, headers={"User-Agent": USER_AGENT},
+                                 stream=True)
+        raw = b""
+        for chunk in response.iter_content(chunk_size=8192):
+            raw += chunk
+            if len(raw) >= WEBSITE_CHECK_MAX_BYTES:
+                break
+        response.close()
+        text = re.sub(r"<[^>]+>", " ", raw[:WEBSITE_CHECK_MAX_BYTES].decode(response.encoding or "utf-8", "ignore")).lower()
     except requests.RequestException:
         return True
     if any(phrase in text for phrase in QUALIFYING_SERVICE_PHRASES):
@@ -397,10 +413,21 @@ def _attempt_state(state, writer, out, output_path, seen, today):
     try:
         seen.update(load_existing_phones(output_path))  # pick up rows another scraper added meanwhile
         elements = fetch_elements(state)
-        new = 0
+        candidates, candidate_phones = [], set()
         for element in elements:
             row = element_to_row(element, state, today)
-            if row and row["phone"] not in seen and website_offers_residential_pickup(row["website"]):
+            if row and row["phone"] not in seen and row["phone"] not in candidate_phones:
+                candidate_phones.add(row["phone"])
+                candidates.append(row)
+        # The one network-bound check per candidate used to run one at a time -- for a state with
+        # many candidates that have a website, this is what made the check "add real time to a
+        # scrape" (see the README). A handful run concurrently instead; ThreadPoolExecutor.map keeps
+        # results in the same order as `candidates`, so writes below stay deterministic either way.
+        with concurrent.futures.ThreadPoolExecutor(max_workers=WEBSITE_CHECK_CONCURRENCY) as pool:
+            keep_flags = pool.map(lambda row: website_offers_residential_pickup(row["website"]), candidates)
+        new = 0
+        for row, keep in zip(candidates, keep_flags):
+            if keep:
                 seen.add(row["phone"])
                 # Locked so a web-app edit's read-modify-write can never land between this write and
                 # its flush and then overwrite this row with a stale, pre-write snapshot of the file.

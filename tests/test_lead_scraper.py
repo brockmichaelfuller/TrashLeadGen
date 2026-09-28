@@ -317,10 +317,6 @@ class RunResilienceTests(unittest.TestCase):
         # any try/except (only _attempt_state's internals were covered), so a failure there crashed
         # the whole run after only 2 of 13 states with no explanation. This reproduces that failure
         # mode directly -- log_debug_detail raising for AL -- and proves AK still gets processed.
-        elements = {
-            "AL": [{"type": "node", "id": 1, "tags": {"name": "Acme Waste", "phone": "205-555-0100"}}],
-            "AK": [{"type": "node", "id": 2, "tags": {"name": "Alaska Waste", "phone": "907-555-0100"}}],
-        }
         with tempfile.TemporaryDirectory() as tmp:
             output_path = Path(tmp) / "leads.csv"
             calls = []
@@ -342,6 +338,13 @@ class RunResilienceTests(unittest.TestCase):
         self.assertIn("AK", printed_states)  # AK was still reached after AL's crash
 
 
+def _mock_html_response(html):
+    """A requests.Response stand-in for the streamed, chunked read website_offers_residential_pickup
+    now does, instead of the simpler (but fully-buffering) .text property."""
+    body = html.encode()
+    return MagicMock(encoding="utf-8", iter_content=lambda chunk_size: [body])
+
+
 class WebsiteResidentialPickupCheckTests(unittest.TestCase):
     def test_no_website_is_kept_unverified(self):
         self.assertTrue(website_offers_residential_pickup(""))
@@ -350,31 +353,47 @@ class WebsiteResidentialPickupCheckTests(unittest.TestCase):
         with patch("lead_scraper.requests.get", side_effect=lead_scraper.requests.RequestException("timeout")):
             self.assertTrue(website_offers_residential_pickup("https://example.com"))
 
+    def test_a_scheme_less_url_is_actually_checked_not_silently_skipped(self):
+        # requests raises MissingSchema for a bare "example.com" with no http(s):// -- caught by the
+        # same broad except as a real network failure, so these silently never got checked at all.
+        html = "<html><body><h1>Roll-Off Dumpster Rental</h1><p>Dumpster rental for construction debris.</p></body></html>"
+        with patch("lead_scraper.requests.get", return_value=_mock_html_response(html)) as mock_get:
+            self.assertFalse(website_offers_residential_pickup("example.com"))
+        self.assertTrue(mock_get.call_args.args[0].startswith("https://"), mock_get.call_args.args[0])
+
     def test_pure_dumpster_rental_site_is_rejected(self):
         # Modeled on "Horizon Disposal Services": all roll-off/dumpster language, nothing about a
         # normal residential route.
         html = "<html><body><h1>Roll-Off Dumpster Rental</h1><p>Fast, affordable dumpster rental for home cleanouts and construction debris removal.</p></body></html>"
-        with patch("lead_scraper.requests.get", return_value=MagicMock(text=html)):
+        with patch("lead_scraper.requests.get", return_value=_mock_html_response(html)):
             self.assertFalse(website_offers_residential_pickup("https://example.com"))
 
     def test_a_site_that_also_mentions_dumpsters_is_still_kept_if_it_offers_curbside_service(self):
         # Modeled on "RAM Waste Systems": real weekly residential pickup that also happens to
         # mention roll-off rentals as one of several services -- must not be penalized for that.
         html = "<html><body><p>Weekly curbside pickup for residential customers, plus temporary dumpster rental for projects.</p></body></html>"
-        with patch("lead_scraper.requests.get", return_value=MagicMock(text=html)):
+        with patch("lead_scraper.requests.get", return_value=_mock_html_response(html)):
             self.assertTrue(website_offers_residential_pickup("https://example.com"))
 
     def test_generic_trash_pickup_wording_does_not_rescue_a_junk_removal_site(self):
         # Modeled on "Breezeway Disposal": a junk-removal company whose copy says "trash pickup"
         # in passing -- that alone must not count as a weekly residential route.
         html = "<html><body><h1>Junk Removal</h1><p>Fast junk and trash pickup, estate cleanout and property cleanout.</p></body></html>"
-        with patch("lead_scraper.requests.get", return_value=MagicMock(text=html)):
+        with patch("lead_scraper.requests.get", return_value=_mock_html_response(html)):
             self.assertFalse(website_offers_residential_pickup("https://example.com"))
 
     def test_a_site_with_neither_signal_is_kept_unverified(self):
         html = "<html><body><p>Welcome to our company. Call us for a quote.</p></body></html>"
-        with patch("lead_scraper.requests.get", return_value=MagicMock(text=html)):
+        with patch("lead_scraper.requests.get", return_value=_mock_html_response(html)):
             self.assertTrue(website_offers_residential_pickup("https://example.com"))
+
+    def test_a_huge_page_is_truncated_instead_of_fully_buffered(self):
+        # The old implementation read response.text (the whole body) before truncating; a genuinely
+        # huge page should still resolve correctly (and not hang) now that it's read in chunks.
+        huge = ("x " * 500_000) + "weekly curbside pickup"  # qualifying phrase past the byte cap
+        with patch("lead_scraper.requests.get", return_value=_mock_html_response(huge)):
+            # Kept unverified is fine here -- the point is it returns promptly, not which way it goes.
+            website_offers_residential_pickup("https://example.com")
 
 
 class DedupeByPhoneTests(unittest.TestCase):

@@ -68,7 +68,7 @@
   th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line); white-space: nowrap; }
   td:first-child, th:first-child { white-space: normal; min-width: 180px; position: sticky; left: 0; background: var(--panel); z-index: 1; }
   tbody tr:hover td:first-child { background: var(--row); }
-  td:nth-child(5), td:nth-child(6) { white-space: normal; overflow-wrap: anywhere; min-width: 200px; }  /* full email / website, wrapped */
+  td:nth-child(8), td:nth-child(9) { white-space: normal; overflow-wrap: anywhere; min-width: 200px; }  /* full email / website, wrapped */
   td.interested select { min-width: 140px; }
   td.notes { min-width: 240px; }
   td.notes input { min-width: 200px; }
@@ -90,6 +90,11 @@
   .removeBtn { padding: 4px 10px; font-size: 12px; }
   .note { color: var(--muted); font-size: 12px; margin-top: 12px; }
   .err { color: var(--danger); margin-top: 8px; min-height: 1em; }
+  .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden;
+             clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
+  th[data-k] { position: relative; }
+  th[data-k]:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+  th[data-k] .sortArrow { margin-left: 4px; color: var(--accent); }
 </style>
 </head>
 <body>
@@ -106,8 +111,9 @@
     <section class="card">
       <h2>Scrape</h2>
       <div class="sub">Searches the United States for residential trash-pickup companies.</div>
+      <label class="sr-only" for="scope">Area to search</label>
       <select id="scope" hidden style="margin-top:10px">
-        <option value="all">Entire U.S. (slow — can outlast a free-plan session)</option>
+        <option value="all">Entire U.S. (slower — can take a few hours; safe to leave running)</option>
       </select>
       <div class="row" style="margin-top:12px">
         <button class="primary" id="run">Run scrape</button>
@@ -137,13 +143,15 @@
       <button type="button" class="link" id="undoBtn">Undo</button>
     </div>
     <div class="stats">
-      <div class="stat"><b id="statTotal">0</b><span>unique phones</span></div>
+      <div class="stat"><b id="statTotal">0</b><span>in this tab</span></div>
       <div class="stat"><b id="statEmails">0</b><span>with email</span></div>
       <div class="stat"><b id="statStates">0</b><span>states</span></div>
       <div class="stat"><b id="statShown">0</b><span>shown</span></div>
     </div>
     <div class="tools">
+      <label class="sr-only" for="search">Search leads</label>
       <input id="search" type="search" placeholder="Search name, phone, email, city…">
+      <label class="sr-only" for="stateFilter">Filter by state</label>
       <select id="stateFilter"><option value="">All states</option></select>
       <button id="copy">Copy phones</button>
       <button id="copyEmails">Copy emails</button>
@@ -153,9 +161,10 @@
       <table>
         <thead><tr>
           <th data-k="company_name">Company</th><th data-k="phone">Phone</th>
+          <th data-k="city">City</th><th data-k="state">State</th><th data-k="timezone">Timezone</th>
           <th data-k="status">Interested?</th><th>Notes</th>
-          <th data-k="email">Email</th><th data-k="website">Website</th><th data-k="address">Address</th><th data-k="city">City</th>
-          <th data-k="state">State</th><th data-k="timezone">Timezone</th><th data-k="date_collected">Collected</th><th data-k="missing" id="missingTh" hidden>Missing</th>
+          <th data-k="email">Email</th><th data-k="website">Website</th><th data-k="address">Address</th>
+          <th data-k="date_collected">Collected</th><th data-k="missing" id="missingTh" hidden>Missing</th>
           <th data-k="source">Source</th><th>Remove</th>
         </tr></thead>
         <tbody id="rows"></tbody>
@@ -210,6 +219,7 @@ function statusCell(l) {
   const wrap = document.createElement("div");
   wrap.className = "cellwrap";
   const sel = document.createElement("select");
+  sel.setAttribute("aria-label", `Interested? for ${l.company_name || l.phone}`);
   for (const [value, label] of [["", "—"], ["Interested", "Interested"], ["Not interested", "Not interested"], ["Do not contact", "Do not contact"]]) {
     sel.append(new Option(label, value));
   }
@@ -234,6 +244,7 @@ function notesCell(l) {
   inp.type = "text";
   inp.className = "notes-input";
   inp.placeholder = "What happened when we called…";
+  inp.setAttribute("aria-label", `Notes for ${l.company_name || l.phone}`);
   inp.value = l.notes || "";
   const tag = savedTag();
   const doSave = debounce(async () => {
@@ -270,6 +281,7 @@ function removeCell(l) {
   btn.className = "danger removeBtn";
   btn.textContent = "Remove";
   btn.title = `Mark "${l.company_name || l.phone}" as not a residential trash hauler`;
+  btn.setAttribute("aria-label", `Remove ${l.company_name || l.phone} as not a residential trash hauler`);
   btn.onclick = async () => {
     const name = l.company_name || l.phone;
     if (!confirm(`Remove "${name}"? This marks it as not a residential trash hauler, so it stays off future scrapes too. You can undo this for a few seconds after.`)) return;
@@ -314,8 +326,16 @@ function renderLeads() {
     const phone = document.createElement("td");
     phone.textContent = l.phone || "";
     tr.append(phone);
+    // City/state/timezone come right after phone -- what's needed to decide whether and when to
+    // call -- so they're visible without scrolling sideways, instead of sitting past Notes/Email/
+    // Website/Address where they used to need a scroll even at a normal laptop width.
+    for (const k of ["city", "state", "timezone"]) {
+      const td = document.createElement("td");
+      td.textContent = l[k] || "";
+      tr.append(td);
+    }
     tr.append(statusCell(l), notesCell(l));
-    for (const k of ["email", "website", "address", "city", "state", "timezone", "date_collected", ...(tab === "partial" ? ["missing"] : [])]) {
+    for (const k of ["email", "website", "address", "date_collected", ...(tab === "partial" ? ["missing"] : [])]) {
       const td = document.createElement("td");
       td.textContent = l[k] || "";
       tr.append(td);
@@ -453,10 +473,40 @@ async function copyText(text) {
 $("search").oninput = $("stateFilter").onchange = renderLeads;
 $("tabComplete").onclick = () => { tab = "complete"; renderLeads(); };
 $("tabPartial").onclick = () => { tab = "partial"; renderLeads(); };
-document.querySelectorAll("th[data-k]").forEach(th => th.onclick = () => {
-  sort = { k: th.dataset.k, dir: sort.k === th.dataset.k ? -sort.dir : 1 };
+
+// Sortable headers: keyboard-operable (not just clickable), with aria-sort and a visible arrow on
+// whichever column is active, so the current sort is announced to screen readers and visible to
+// everyone else too -- previously nothing on the page showed it at all.
+const sortableHeaders = [...document.querySelectorAll("th[data-k]")];
+const headerLabels = new Map(sortableHeaders.map(th => [th, th.textContent]));
+
+function updateSortIndicators() {
+  for (const th of sortableHeaders) {
+    const active = sort.k === th.dataset.k;
+    th.setAttribute("aria-sort", active ? (sort.dir === 1 ? "ascending" : "descending") : "none");
+    th.textContent = headerLabels.get(th) + (active ? (sort.dir === 1 ? " ▲" : " ▼") : "");
+  }
+}
+
+function toggleSort(th) {
+  // Three clicks cycle ascending -> descending -> back to the default newest-first order, so
+  // there's always a way back without a page reload.
+  if (sort.k !== th.dataset.k) sort = { k: th.dataset.k, dir: 1 };
+  else if (sort.dir === 1) sort = { k: th.dataset.k, dir: -1 };
+  else sort = { k: null, dir: 1 };
+  updateSortIndicators();
   renderLeads();
-});
+}
+
+for (const th of sortableHeaders) {
+  th.setAttribute("role", "button");
+  th.setAttribute("tabindex", "0");
+  th.onclick = () => toggleSort(th);
+  th.onkeydown = (e) => {
+    if (e.key === "Enter" || e.key === " ") { e.preventDefault(); toggleSort(th); }
+  };
+}
+updateSortIndicators();
 
 $("run").onclick = async () => {
   $("err").textContent = "";

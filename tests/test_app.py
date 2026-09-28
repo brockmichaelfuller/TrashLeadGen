@@ -306,7 +306,10 @@ class BackupSchedulingTests(unittest.TestCase):
         app.schedule_sync()
         with app.lock:
             self.assertIsNot(app._sync_timer, first_timer)
-            self.assertFalse(first_timer.is_alive())  # the stale retry was cancelled, not left running
+        # cancel() just signals the timer's thread to stop; give it a moment to actually exit before
+        # checking, rather than racing its teardown immediately after cancel() returns.
+        first_timer.join(timeout=1)
+        self.assertFalse(first_timer.is_alive())  # the stale retry was cancelled, not left running
 
 
 if __name__ == "__main__":
