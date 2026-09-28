@@ -12,15 +12,13 @@ from pathlib import Path
 from unittest.mock import patch
 
 import app
+import db
 
 
 class ServerTestCase(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.tmpdir = tempfile.TemporaryDirectory()
-        cls.leads_path = Path(cls.tmpdir.name) / "leads.csv"
-        cls._orig_leads_path = app.LEADS_PATH
-        app.LEADS_PATH = cls.leads_path
+        cls._orig_db_path = app.DB_PATH
         cls.server = ThreadingHTTPServer(("127.0.0.1", 0), app.Handler)
         cls.port = cls.server.server_address[1]
         cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
@@ -31,16 +29,20 @@ class ServerTestCase(unittest.TestCase):
         cls.server.shutdown()
         cls.thread.join(timeout=5)
         cls.server.server_close()
-        app.LEADS_PATH = cls._orig_leads_path
-        cls.tmpdir.cleanup()
+        app.DB_PATH = cls._orig_db_path
 
     def setUp(self):
-        with self.leads_path.open("w", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=["company_name", "phone", "status", "notes", "rejected_at"])
-            writer.writeheader()
-            writer.writerow({"company_name": "Acme Waste", "phone": "111", "status": "", "notes": "", "rejected_at": ""})
-            writer.writerow({"company_name": "Declined Co", "phone": "222", "status": "Do not contact",
-                              "notes": "already said no", "rejected_at": ""})
+        # A fresh temp dir (and DB file) per test, rather than reusing one path across the class --
+        # SQLite's WAL mode leaves -wal/-shm side files that a simple unlink-and-recreate of the main
+        # file wouldn't reliably clear between tests. The server picks up app.DB_PATH per-request, so
+        # this doesn't require restarting it.
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmpdir.cleanup)
+        self.db_path = Path(self.tmpdir.name) / "leads.db"
+        app.DB_PATH = self.db_path
+        db.insert_if_new(self.db_path, {"company_name": "Acme Waste", "phone": "111"})
+        db.insert_if_new(self.db_path, {"company_name": "Declined Co", "phone": "222",
+                                         "status": "Do not contact", "notes": "already said no"})
         with app.lock:
             app.job.update(proc=None, log=[], started=False, scope="", states=None, stopped=False)
         with app._auth_lock:

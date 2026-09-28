@@ -1,0 +1,158 @@
+"""SQLite storage for leads, replacing the old CSV-file-plus-advisory-lock approach.
+
+`phone` is the primary key, so the database itself is what prevents duplicates now -- no more
+in-memory "seen" bookkeeping racing a concurrent writer, and no more fcntl-based locking between
+the scraper subprocess and the web app: SQLite's own WAL journal mode plus a busy_timeout give real
+transactional concurrency for free. Every function here opens and closes its own short-lived
+connection, which is what makes this safe to call from any thread or process without extra care.
+
+GitHub/Google Sheets backup (sync_leads.py) is untouched and still speaks CSV -- export_to_csv/
+import_from_csv are the bridge at that boundary, so the already-tested backup/restore logic never
+has to know the local store changed.
+"""
+import csv
+import sqlite3
+from pathlib import Path
+
+import sync_leads
+
+COLUMNS = ["company_name", "phone", "email", "website", "address", "city", "state", "timezone",
+           "source", "date_collected", "status", "notes", "rejected_at"]
+
+_SCHEMA = """
+CREATE TABLE IF NOT EXISTS leads (
+    phone TEXT PRIMARY KEY,
+    company_name TEXT NOT NULL DEFAULT '',
+    email TEXT NOT NULL DEFAULT '',
+    website TEXT NOT NULL DEFAULT '',
+    address TEXT NOT NULL DEFAULT '',
+    city TEXT NOT NULL DEFAULT '',
+    state TEXT NOT NULL DEFAULT '',
+    timezone TEXT NOT NULL DEFAULT '',
+    source TEXT NOT NULL DEFAULT '',
+    date_collected TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT '',
+    notes TEXT NOT NULL DEFAULT '',
+    rejected_at TEXT NOT NULL DEFAULT ''
+)
+"""
+
+_INSERT_COLUMNS = ", ".join(COLUMNS)
+_INSERT_PLACEHOLDERS = ", ".join(f":{c}" for c in COLUMNS)
+
+
+def connect(db_path):
+    """A fresh, short-lived connection with the schema ensured. WAL mode lets the scraper subprocess
+    write while the web app reads/writes without either blocking the other; busy_timeout makes a
+    write that does collide wait a moment and retry instead of raising "database is locked"."""
+    Path(db_path).parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(db_path), timeout=10)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=10000")
+    conn.execute(_SCHEMA)
+    return conn
+
+
+def _as_dict(row):
+    return {k: row[k] for k in row.keys()}
+
+
+def all_leads(db_path, include_rejected=False):
+    """Every lead, newest-inserted first (matches the old CSV's "most recently appended" ordering
+    that the site's default no-sort view relied on)."""
+    with connect(db_path) as conn:
+        clause = "" if include_rejected else "WHERE rejected_at = ''"
+        rows = conn.execute(f"SELECT * FROM leads {clause} ORDER BY rowid").fetchall()
+        return [_as_dict(r) for r in rows]
+
+
+def existing_phones(db_path):
+    with connect(db_path) as conn:
+        return {r["phone"] for r in conn.execute("SELECT phone FROM leads").fetchall()}
+
+
+def insert_if_new(db_path, row):
+    """Insert a scraped row if its phone isn't already present. Returns True if it was inserted --
+    the primary key constraint is what actually guarantees no duplicate ever lands, even if two
+    writers raced to insert the same phone at once."""
+    values = {c: (row.get(c) or "") for c in COLUMNS}
+    with connect(db_path) as conn:
+        cur = conn.execute(f"INSERT OR IGNORE INTO leads ({_INSERT_COLUMNS}) VALUES ({_INSERT_PLACEHOLDERS})", values)
+        conn.commit()
+        return cur.rowcount > 0
+
+
+def update_fields(db_path, phone, updates):
+    """Set arbitrary fields on the row with this phone. Returns False if the phone isn't found."""
+    if not updates:
+        return False
+    with connect(db_path) as conn:
+        if conn.execute("SELECT 1 FROM leads WHERE phone = ?", (phone,)).fetchone() is None:
+            return False
+        set_clause = ", ".join(f"{k} = :{k}" for k in updates)
+        conn.execute(f"UPDATE leads SET {set_clause} WHERE phone = :phone", {**updates, "phone": phone})
+        conn.commit()
+        return True
+
+
+def is_rejected(db_path, phone):
+    with connect(db_path) as conn:
+        row = conn.execute("SELECT rejected_at FROM leads WHERE phone = ?", (phone,)).fetchone()
+        return bool(row and row["rejected_at"])
+
+
+def export_to_csv(db_path, csv_path):
+    """Snapshot the whole table to a CSV -- this is what sync_leads.py backs up and restores."""
+    with connect(db_path) as conn:
+        rows = conn.execute("SELECT * FROM leads ORDER BY rowid").fetchall()
+    csv_path.parent.mkdir(parents=True, exist_ok=True)
+    with csv_path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=COLUMNS)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({c: row[c] for c in COLUMNS})
+
+
+def import_from_csv(db_path, csv_path):
+    """Populate the database from a CSV -- used only to seed a freshly created (empty) database from
+    a restored backup, on a host that's never had a database of its own yet."""
+    if not csv_path.exists():
+        return
+    with csv_path.open(newline="", encoding="utf-8") as f:
+        rows = list(csv.DictReader(f))
+    with connect(db_path) as conn:
+        for row in rows:
+            if not (row.get("phone") or "").strip():
+                continue  # a stray blank separator row from an older Sheets export, if one slipped through
+            values = {c: (row.get(c) or "") for c in COLUMNS}
+            conn.execute(f"INSERT OR REPLACE INTO leads ({_INSERT_COLUMNS}) VALUES ({_INSERT_PLACEHOLDERS})", values)
+        conn.commit()
+
+
+def is_empty(db_path):
+    if not Path(db_path).exists():
+        return True
+    with connect(db_path) as conn:
+        return conn.execute("SELECT 1 FROM leads LIMIT 1").fetchone() is None
+
+
+def sync_backup(db_path):
+    """Export the database to its companion CSV and back that up -- sync_leads.py only ever speaks
+    CSV, so this is the bridge that lets the (already-tested) GitHub/Sheets logic stay untouched.
+    Returns the failure message if the backup push failed just now, or None."""
+    csv_path = Path(db_path).with_suffix(".csv")
+    export_to_csv(db_path, csv_path)
+    return sync_leads.sync(csv_path)
+
+
+def restore_if_empty(db_path):
+    """Recover prior runs' data on a fresh (empty) host: pull the last backup into the companion CSV
+    and import it -- but only when there's actually nothing here yet, since an existing database is
+    always the more current copy. Both app.py (on startup) and lead_scraper.py (at the start of a
+    run) call this, so a fresh container ends up with real data regardless of which one runs first."""
+    if not is_empty(db_path):
+        return
+    csv_path = Path(db_path).with_suffix(".csv")
+    sync_leads.restore(csv_path)
+    import_from_csv(db_path, csv_path)

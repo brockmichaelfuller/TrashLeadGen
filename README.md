@@ -1,6 +1,6 @@
 # TrashLeadGen
 
-Finds residential curbside trash-hauling companies across the U.S. and saves their **name and phone number** to a CSV, with a small web page (`app.py`) to run scrapes and record outreach outcomes. This is a research list for outreach prep. Nobody should be called or texted from it before Thomas reviews it (TCPA and do-not-call rules apply once numbers are dialed).
+Finds residential curbside trash-hauling companies across the U.S. and saves their **name and phone number** to a local SQLite database, with a small web page (`app.py`) to run scrapes and record outreach outcomes. This is a research list for outreach prep. Nobody should be called or texted from it before Thomas reviews it (TCPA and do-not-call rules apply once numbers are dialed).
 
 ## Data source
 
@@ -47,14 +47,18 @@ Options:
 
 | Flag | Default | Meaning |
 |---|---|---|
-| `--output` | `output/leads.csv` | Where results are written |
+| `--output` | `output/leads.db` | Where the SQLite database is written |
 | `--states` | all 50 + DC | Limit the run, e.g. `--states CO WA` |
+
+## Storage
+
+Leads live in a SQLite database (`db.py`), with `phone` as the primary key -- that's what actually guarantees no duplicate, not application code. Both the web app and the scraper subprocess read and write it directly (SQLite's WAL journal mode plus a busy-timeout give real concurrent access; nothing needs its own file lock). GitHub/Google Sheets backup only ever speaks CSV, so `db.py` exports the database to a companion `output/leads.csv` right before every backup push, and imports that same file into a fresh database on restore -- the backup logic itself (`sync_leads.py`) never had to change.
 
 ## Output columns
 
 `company_name`, `phone` (format `(555) 123-4567`), `city`, `state`, `source` (the OSM object, e.g. `openstreetmap:node/123`), `date_collected`.
 
-- **Deduped by phone number.** Rerunning appends only new phones, so the script is safe to rerun or resume.
+- **Deduped by phone number.** Rerunning only adds new phones (the database's primary key rejects a duplicate outright), so the script is safe to rerun or resume.
 - **Progress is saved after every state.** A failed state doesn't stop the run. Since most failures are brief Overpass hiccups, any state still failing after its normal retries gets one more automatic pass (after a short cooldown) before being reported — only a state that fails that too shows up as failed, with a Retry button on the page for whatever's left.
 - `state` is the state searched, so it is always filled in. `city` comes from the OSM address and is blank when the mapper didn't add one.
 - **Complete vs partial.** A lead with a company name, phone, email and timezone is "complete". Leads missing any of those are kept but shown separately as "partial" (with what is missing). The page has a tab for each, and Download CSV exports the tab you are viewing.
@@ -62,16 +66,16 @@ Options:
 - **Website check.** A candidate that clears the name filters and has a website gets that site's own text checked (free, no AI/API cost) for language distinguishing a normal residential route ("weekly curbside," "residential pickup") from a dumpster-rental, junk-removal, or portable-toilet business ("dumpster rental," "junk removal," "porta potty rental") — this is what catches a company like "Horizon Disposal Services," whose name gives no hint it's actually a dumpster-rental business. A site that mentions both (common — plenty of real haulers also rent dumpsters) is kept; an unreachable site or one with neither signal is kept unverified rather than dropped, so a network hiccup never costs a real lead. It's still a heuristic, not a guarantee — review the list before outreach, and extend `DISQUALIFYING_SERVICE_PHRASES`/`QUALIFYING_SERVICE_PHRASES` (or `KNOWN_BRANDS`/`EXCLUDE_NAME`) as gaps turn up. This check adds real time to a scrape (a few new-candidate websites are fetched concurrently at a time, ~10s timeout each, rather than one at a time).
 - **`status` and `notes`** start blank and aren't set by the scraper. Once Thomas has reviewed the list and outreach begins, use the "Interested?" dropdown and Notes field on each row (right next to the phone number) to record the outcome of a call — they save as you type, each field saves independently so two people editing the same lead at once can't clobber each other's work, and both columns are included in the CSV export.
 - **"Not interested" and "Do not contact"** leads stay visible in the table (for the record) but are automatically left out of Copy phones, Copy emails, and Download CSV.
-- **Deleting a lead is permanent.** The Remove button on each row (confirms first, and offers Undo for a few seconds after) doesn't just drop the row — it's kept with a `rejected_at` date so its phone stays in the file forever, which is what stops a later scrape from seeing it as new and adding it right back. A rejected row is hidden everywhere else (the site, exports, the Google Sheet), it just isn't gone from disk.
+- **Deleting a lead is permanent.** The Remove button on each row (confirms first, and offers Undo for a few seconds after) doesn't just drop the row — it's kept with a `rejected_at` date so its phone stays in the database forever, which is what stops a later scrape from seeing it as new and adding it right back. A rejected row is hidden everywhere else (the site, exports, the Google Sheet), it just isn't gone from the database.
 
 ## Making data permanent on Render
 
-Render's free plan has no persistent disk: every redeploy, and every time the service spins back up after ~15 minutes idle, starts from an empty filesystem and loses whatever was scraped. `sync_leads.py` backs the CSV up externally so that doesn't lose data — it's a no-op with nothing configured, and each backend below is independently optional:
+Render's free plan has no persistent disk: every redeploy, and every time the service spins back up after ~15 minutes idle, starts from an empty filesystem and loses whatever was scraped. `sync_leads.py` backs up a CSV export of the database externally so that doesn't lose data — it's a no-op with nothing configured, and each backend below is independently optional:
 
-- **GitHub** — commits `output/leads.csv` to this repo after every state and every edit, and restores the latest commit when the app starts on a fresh host. Set `GITHUB_TOKEN` (a personal access token with Contents read/write on this repo) and `GITHUB_REPO` (`owner/name`). **If `GITHUB_REPO` is ever set to the same repo Render deploys from**, every backup commit will also trigger a new deploy (auto-deploy watches every push to the branch) — mid-scrape, that restarts the service and kills the run. Point it at a separate repo (or a branch Render doesn't deploy) instead, or turn off auto-deploy for that branch.
-- **Google Sheets** — overwrites a sheet with the current CSV after every state and every edit, via a Google service account. Set `GOOGLE_SERVICE_ACCOUNT_JSON` (the full service-account key JSON, as one string) and `GOOGLE_SHEET_ID` (from the sheet's URL, between `/d/` and `/edit`). Share the target sheet with the service account's `client_email` as an Editor first, or the writes will fail (see the app's log). The sheet (only the sheet — the site's own table order is untouched) is grouped into sections by the Interested? status, top to bottom: no status yet, Interested, Not interested, Do not contact, each separated by a blank row; within each section, complete leads (see above) come first.
+- **GitHub** — commits `output/leads.csv` to this repo after every state and every edit, and restores the latest commit (into a fresh database) when the app starts with none. Set `GITHUB_TOKEN` (a personal access token with Contents read/write on this repo) and `GITHUB_REPO` (`owner/name`). **If `GITHUB_REPO` is ever set to the same repo Render deploys from**, every backup commit will also trigger a new deploy (auto-deploy watches every push to the branch) — mid-scrape, that restarts the service and kills the run. Point it at a separate repo (or a branch Render doesn't deploy) instead, or turn off auto-deploy for that branch.
+- **Google Sheets** — overwrites a sheet with the current CSV export after every state and every edit, via a Google service account. Set `GOOGLE_SERVICE_ACCOUNT_JSON` (the full service-account key JSON, as one string) and `GOOGLE_SHEET_ID` (from the sheet's URL, between `/d/` and `/edit`). Share the target sheet with the service account's `client_email` as an Editor first, or the writes will fail (see the app's log). The sheet (only the sheet — the site's own table order is untouched) is grouped into sections by the Interested? status, top to bottom: no status yet, Interested, Not interested, Do not contact, then Rejected, each separated by a blank row; within each section, complete leads (see above) come first.
 
-Both can be set at once — on startup the app tries GitHub first and falls back to Sheets if GitHub has nothing (so either one alone is enough to survive a restart). Neither is required for local use.
+Both can be set at once — on startup the app tries GitHub first and falls back to Sheets if GitHub has nothing (so either one alone is enough to survive a restart, into a brand new database). Neither is required for local use.
 
 A save from the web page (a status/notes edit or a delete/undo) writes to disk immediately and returns right away; the backup push happens a few seconds later in the background, so a burst of edits results in one push, not one per keystroke-save. If a push fails, it retries once automatically, and the page shows a banner for as long as the most recent attempt is still failing.
 

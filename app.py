@@ -17,16 +17,17 @@ import subprocess
 import sys
 import threading
 import time
+from datetime import date
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 ROOT = Path(__file__).parent
 sys.path.insert(0, str(ROOT))
-from lead_scraper import COLUMNS, STATE_GROUPS, STATES, dedupe_by_phone, ensure_columns, is_rejected, locked, missing_fields  # noqa: E402
-from datetime import date  # noqa: E402
+from lead_scraper import STATE_GROUPS, STATES, missing_fields  # noqa: E402
+import db  # noqa: E402
 import sync_leads  # noqa: E402
-LEADS_PATH = ROOT / "output" / "leads.csv"
+DB_PATH = ROOT / "output" / "leads.db"
 INDEX_PATH = ROOT / "static" / "index.html"
 MAX_LOG_LINES = 500
 SCRAPER_SCRIPT = "lead_scraper.py"
@@ -51,7 +52,7 @@ _sync_timer = None
 
 def _run_sync():
     global _sync_timer
-    error = sync_leads.sync(LEADS_PATH)
+    error = db.sync_backup(DB_PATH)
     with lock:
         backup_state["error"] = error
         _sync_timer = None
@@ -73,14 +74,11 @@ def schedule_sync():
     _schedule_sync(SYNC_DEBOUNCE_SECONDS)
 
 
-def read_csv(path):
+def read_leads(db_path):
     """All non-rejected leads, each flagged complete (name, phone, email and timezone) or partial,
-    with what's missing. Rejected rows (see delete_lead) are kept in the file but never surfaced here."""
-    if not path.exists():
-        return []
-    with path.open(newline="", encoding="utf-8") as f:
-        rows = list(csv.DictReader(f))
-    rows = [row for row in rows if not is_rejected(row)]
+    with what's missing. Rejected rows (see delete_lead) are kept in the database but never surfaced
+    here."""
+    rows = db.all_leads(db_path)
     for row in rows:
         missing = missing_fields(row)
         row["complete"] = not missing
@@ -88,73 +86,26 @@ def read_csv(path):
     return rows
 
 
-def update_lead(path, phone, updates):
+def update_lead(db_path, phone, updates):
     """Set status/notes on the row with this phone number. Returns False if the phone isn't found."""
-    if not path.exists():
-        return False
-    # Locked so the scraper subprocess can't append a row between this read and this write -- that
-    # window is exactly what used to make a freshly-scraped lead vanish under a concurrent edit.
-    with locked(path):
-        with path.open(newline="", encoding="utf-8") as f:
-            reader = csv.DictReader(f)
-            fieldnames = reader.fieldnames
-            rows = list(reader)
-        row = next((r for r in rows if r.get("phone") == phone), None)
-        if row is None:
-            return False
-        row.update(updates)
-        with path.open("w", newline="", encoding="utf-8") as f:
-            writer = csv.DictWriter(f, fieldnames=fieldnames)
-            writer.writeheader()
-            writer.writerows(rows)
-    return True
+    return db.update_fields(db_path, phone, updates)
 
 
-def delete_lead(path, phone):
+def delete_lead(db_path, phone):
     """Mark the row with this phone number rejected -- for a lead that never should have matched
     (wrong business type), as opposed to a real hauler marked "Do not contact". The row is kept
-    (just hidden from read_csv and everything built on it) rather than removed outright, so its
+    (just hidden from read_leads and everything built on it) rather than removed outright, so its
     phone permanently blocks the scraper from re-adding it on a later run. Returns False if the
     phone isn't found."""
-    if not path.exists():
-        return False
-    with locked(path):
-        with path.open(newline="", encoding="utf-8") as f:
-            reader = csv.DictReader(f)
-            fieldnames = reader.fieldnames
-            rows = list(reader)
-        row = next((r for r in rows if r.get("phone") == phone), None)
-        if row is None:
-            return False
-        row["rejected_at"] = date.today().isoformat()
-        if "rejected_at" not in fieldnames:  # older CSV, in case this runs before ensure_columns does
-            fieldnames = list(fieldnames) + ["rejected_at"]
-        with path.open("w", newline="", encoding="utf-8") as f:
-            writer = csv.DictWriter(f, fieldnames=fieldnames)
-            writer.writeheader()
-            writer.writerows(rows)
-    return True
+    return db.update_fields(db_path, phone, {"rejected_at": date.today().isoformat()})
 
 
-def undelete_lead(path, phone):
+def undelete_lead(db_path, phone):
     """Undo a delete within the same page load (see the "Undo" link in the UI right after removing
     a lead) by clearing rejected_at. Returns False if the phone isn't found or wasn't rejected."""
-    if not path.exists():
+    if not db.is_rejected(db_path, phone):
         return False
-    with locked(path):
-        with path.open(newline="", encoding="utf-8") as f:
-            reader = csv.DictReader(f)
-            fieldnames = reader.fieldnames
-            rows = list(reader)
-        row = next((r for r in rows if r.get("phone") == phone), None)
-        if row is None or not is_rejected(row):
-            return False
-        row["rejected_at"] = ""
-        with path.open("w", newline="", encoding="utf-8") as f:
-            writer = csv.DictWriter(f, fieldnames=fieldnames)
-            writer.writeheader()
-            writer.writerows(rows)
-    return True
+    return db.update_fields(db_path, phone, {"rejected_at": ""})
 
 
 # Leads marked with either of these are kept in the UI (for the record) but left out of every
@@ -167,11 +118,11 @@ DO_NOT_EXPORT_STATUSES = {"Not interested", "Do not contact"}
 VALID_STATUSES = set(sync_leads.STATUS_SECTIONS)
 
 
-def export_csv(path, which="all"):
+def export_csv(db_path, which="all"):
     out = io.StringIO()
-    writer = csv.DictWriter(out, fieldnames=COLUMNS, extrasaction="ignore", restval="")
+    writer = csv.DictWriter(out, fieldnames=db.COLUMNS, extrasaction="ignore", restval="")
     writer.writeheader()
-    for row in read_csv(path):
+    for row in read_leads(db_path):
         if row.get("status") in DO_NOT_EXPORT_STATUSES:
             continue
         if which == "all" or (which == "complete") == row["complete"]:
@@ -256,7 +207,7 @@ def start_run(group_id="all", explicit_states=None):
     with lock:
         if is_running():
             return "A run is already in progress."
-        cmd = [sys.executable, "-u", str(ROOT / SCRAPER_SCRIPT), "--output", str(LEADS_PATH)]
+        cmd = [sys.executable, "-u", str(ROOT / SCRAPER_SCRIPT), "--output", str(DB_PATH)]
         if states:
             cmd += ["--states", *states]
         proc = subprocess.Popen(cmd, cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
@@ -381,7 +332,7 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/":
             self.send_body(INDEX_PATH.read_bytes(), "text/html; charset=utf-8")
         elif path == "/api/leads":
-            self.send_json(read_csv(LEADS_PATH))
+            self.send_json(read_leads(DB_PATH))
         elif path == "/api/status":
             with lock:
                 running = is_running()
@@ -404,10 +355,10 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json({"groups": GROUPS})
         elif path == "/api/export.csv":
             which = {"complete": "complete", "partial": "partial"}.get(parse_qs(query).get("set", [""])[0], "all")
-            self.send_body(export_csv(LEADS_PATH, which), "text/csv",
+            self.send_body(export_csv(DB_PATH, which), "text/csv",
                            extra={"Content-Disposition": f'attachment; filename="leads-{which}.csv"'})
         elif path == "/api/debug.log":
-            debug_path = LEADS_PATH.parent / "debug.log"
+            debug_path = DB_PATH.parent / "debug.log"
             body = debug_path.read_bytes() if debug_path.exists() else b"(empty)"
             self.send_body(body, "text/plain; charset=utf-8")
         else:
@@ -437,7 +388,7 @@ class Handler(BaseHTTPRequestHandler):
             if "status" in updates and updates["status"] not in VALID_STATUSES:
                 return self.send_json({"error": f"status must be one of {sorted(VALID_STATUSES)}"}, 400)
             with lock:
-                ok = update_lead(LEADS_PATH, phone, updates)
+                ok = update_lead(DB_PATH, phone, updates)
             if ok:
                 schedule_sync()
             return self.send_json({"ok": True}) if ok else self.send_json({"error": "Lead not found"}, 404)
@@ -446,7 +397,7 @@ class Handler(BaseHTTPRequestHandler):
             if not phone:
                 return self.send_json({"error": "phone is required"}, 400)
             with lock:
-                ok = delete_lead(LEADS_PATH, phone)
+                ok = delete_lead(DB_PATH, phone)
             if ok:
                 schedule_sync()
             return self.send_json({"ok": True}) if ok else self.send_json({"error": "Lead not found"}, 404)
@@ -455,7 +406,7 @@ class Handler(BaseHTTPRequestHandler):
             if not phone:
                 return self.send_json({"error": "phone is required"}, 400)
             with lock:
-                ok = undelete_lead(LEADS_PATH, phone)
+                ok = undelete_lead(DB_PATH, phone)
             if ok:
                 schedule_sync()
             return self.send_json({"ok": True}) if ok else self.send_json({"error": "Lead not found"}, 404)
@@ -471,10 +422,7 @@ def main():
     host = os.environ.get("HOST", "127.0.0.1")
     if host != "127.0.0.1" and not os.environ.get("APP_PASSWORD"):
         sys.exit("Refusing to listen on the network without APP_PASSWORD set.")
-    sync_leads.restore(LEADS_PATH)  # restore the last backup, since a fresh host starts empty
-    ensure_columns(LEADS_PATH)  # upgrade an older CSV (e.g. one missing "rejected_at") in place
-    if dedupe_by_phone(LEADS_PATH):  # clean up anything an overlapping run/restore duplicated
-        sync_leads.sync(LEADS_PATH)
+    db.restore_if_empty(DB_PATH)  # recover the last backup, since a fresh host starts with no database
     server = ThreadingHTTPServer((host, args.port), Handler)
     print(f"TrashLeadGen UI: http://{host}:{args.port}  (Ctrl+C to stop)", flush=True)
     try:

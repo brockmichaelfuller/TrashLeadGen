@@ -1,15 +1,12 @@
-import csv
 import tempfile
-import threading
-import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
 import app
-from app import (delete_lead, parse_failed_states, parse_finished_states, read_csv, undelete_lead,
+import db
+from app import (delete_lead, parse_failed_states, parse_finished_states, read_leads, undelete_lead,
                   update_lead, user_facing_log)
-from lead_scraper import load_existing_phones, locked, normalize_phone
 
 
 class ParseFailedStatesTests(unittest.TestCase):
@@ -18,7 +15,7 @@ class ParseFailedStatesTests(unittest.TestCase):
             "[1/3] AL: 2 new companies",
             "[2/3] AK: skipped -- couldn't connect to the map data source",
             "[3/3] AZ: 1 new companies",
-            "Done. 3 new rows -> output/leads.csv (3 total unique phones)",
+            "Done. 3 new rows -> output/leads.db (3 total unique phones)",
             "Failed states (rerun to retry): AK",
         ]
         self.assertEqual(parse_failed_states(log), ["AK"])
@@ -33,7 +30,7 @@ class ParseFailedStatesTests(unittest.TestCase):
         self.assertEqual(parse_failed_states(log), ["AL", "AK"])
 
     def test_no_failures_is_an_empty_list(self):
-        log = ["[1/1] CO: 4 new companies", "Done. 4 new rows -> output/leads.csv (4 total unique phones)"]
+        log = ["[1/1] CO: 4 new companies", "Done. 4 new rows -> output/leads.db (4 total unique phones)"]
         self.assertEqual(parse_failed_states(log), [])
 
     def test_does_not_duplicate_a_state_seen_twice(self):
@@ -46,7 +43,7 @@ class ParseFailedStatesTests(unittest.TestCase):
             "[2/2] WY: 1 new companies",
             "1 state(s) had a temporary problem -- retrying automatically in 30s: CO",
             "retry succeeded: CO: 0 new companies",
-            "Done. 1 new rows -> output/leads.csv (2 total unique phones)",
+            "Done. 1 new rows -> output/leads.db (2 total unique phones)",
         ]
         self.assertEqual(parse_failed_states(log), [])
 
@@ -93,7 +90,7 @@ class UserFacingLogTests(unittest.TestCase):
     def test_strips_the_cli_only_summary_lines(self):
         log = [
             "[1/1] CO: 4 new companies",
-            "Done. 4 new rows -> /opt/render/project/src/output/leads.csv (4 total unique phones)",
+            "Done. 4 new rows -> /opt/render/project/src/output/leads.db (4 total unique phones)",
             "Failed states (rerun to retry): AK",
         ]
         self.assertEqual(user_facing_log(log), ["[1/1] CO: 4 new companies"])
@@ -102,170 +99,80 @@ class UserFacingLogTests(unittest.TestCase):
 class DeleteLeadTests(unittest.TestCase):
     def test_marks_only_the_matching_row_rejected_rather_than_removing_it(self):
         # The row is kept (not removed) so its phone permanently blocks the scraper from treating
-        # it as new again -- see is_rejected() and the scraper's use of load_existing_phones().
+        # it as new again -- see db.is_rejected() and the scraper's use of db.existing_phones().
         with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "leads.csv"
-            with path.open("w", newline="") as f:
-                writer = csv.DictWriter(f, fieldnames=["company_name", "phone"])
-                writer.writeheader()
-                writer.writerow({"company_name": "Keep Me", "phone": "111"})
-                writer.writerow({"company_name": "Remove Me", "phone": "222"})
-            self.assertTrue(delete_lead(path, "222"))
-            with path.open() as f:
-                rows = list(csv.DictReader(f))
-        self.assertEqual([r["company_name"] for r in rows], ["Keep Me", "Remove Me"])
-        self.assertEqual(rows[0]["rejected_at"], "")
-        self.assertTrue(rows[1]["rejected_at"])
+            db_path = Path(tmp) / "leads.db"
+            db.insert_if_new(db_path, {"company_name": "Keep Me", "phone": "111"})
+            db.insert_if_new(db_path, {"company_name": "Remove Me", "phone": "222"})
+            self.assertTrue(delete_lead(db_path, "222"))
+            rows = {r["phone"]: r for r in db.all_leads(db_path, include_rejected=True)}
+        self.assertEqual(rows["111"]["rejected_at"], "")
+        self.assertTrue(rows["222"]["rejected_at"])
 
-    def test_rejected_leads_are_hidden_from_read_csv(self):
+    def test_rejected_leads_are_hidden_from_read_leads(self):
         with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "leads.csv"
-            with path.open("w", newline="") as f:
-                writer = csv.DictWriter(f, fieldnames=["company_name", "phone"])
-                writer.writeheader()
-                writer.writerow({"company_name": "Keep Me", "phone": "111"})
-                writer.writerow({"company_name": "Remove Me", "phone": "222"})
-            delete_lead(path, "222")
-            self.assertEqual([r["company_name"] for r in read_csv(path)], ["Keep Me"])
+            db_path = Path(tmp) / "leads.db"
+            db.insert_if_new(db_path, {"company_name": "Keep Me", "phone": "111"})
+            db.insert_if_new(db_path, {"company_name": "Remove Me", "phone": "222"})
+            delete_lead(db_path, "222")
+            self.assertEqual([r["company_name"] for r in read_leads(db_path)], ["Keep Me"])
 
     def test_a_rejected_phone_is_never_treated_as_new_by_a_later_scrape(self):
         with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "leads.csv"
-            with path.open("w", newline="") as f:
-                writer = csv.DictWriter(f, fieldnames=["company_name", "phone"])
-                writer.writeheader()
-                writer.writerow({"company_name": "Junk Removal Co", "phone": "222"})
-            delete_lead(path, "222")
-            self.assertIn(normalize_phone("222") or "222", load_existing_phones(path))
+            db_path = Path(tmp) / "leads.db"
+            db.insert_if_new(db_path, {"company_name": "Junk Removal Co", "phone": "222"})
+            delete_lead(db_path, "222")
+            self.assertIn("222", db.existing_phones(db_path))
 
     def test_returns_false_for_an_unknown_phone(self):
         with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "leads.csv"
-            with path.open("w", newline="") as f:
-                writer = csv.DictWriter(f, fieldnames=["company_name", "phone"])
-                writer.writeheader()
-                writer.writerow({"company_name": "A", "phone": "111"})
-            self.assertFalse(delete_lead(path, "999"))
+            db_path = Path(tmp) / "leads.db"
+            db.insert_if_new(db_path, {"company_name": "A", "phone": "111"})
+            self.assertFalse(delete_lead(db_path, "999"))
 
-    def test_returns_false_when_the_file_does_not_exist(self):
+    def test_returns_false_when_the_database_does_not_exist(self):
         with tempfile.TemporaryDirectory() as tmp:
-            self.assertFalse(delete_lead(Path(tmp) / "missing.csv", "111"))
+            self.assertFalse(delete_lead(Path(tmp) / "missing.db", "111"))
 
 
 class UndeleteLeadTests(unittest.TestCase):
     def test_clears_rejected_at_and_the_lead_reappears(self):
         with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "leads.csv"
-            with path.open("w", newline="") as f:
-                writer = csv.DictWriter(f, fieldnames=["company_name", "phone"])
-                writer.writeheader()
-                writer.writerow({"company_name": "Oops Not Junk After All", "phone": "222"})
-            delete_lead(path, "222")
-            self.assertEqual(read_csv(path), [])
-            self.assertTrue(undelete_lead(path, "222"))
-            self.assertEqual([r["company_name"] for r in read_csv(path)], ["Oops Not Junk After All"])
+            db_path = Path(tmp) / "leads.db"
+            db.insert_if_new(db_path, {"company_name": "Oops Not Junk After All", "phone": "222"})
+            delete_lead(db_path, "222")
+            self.assertEqual(read_leads(db_path), [])
+            self.assertTrue(undelete_lead(db_path, "222"))
+            self.assertEqual([r["company_name"] for r in read_leads(db_path)], ["Oops Not Junk After All"])
 
     def test_returns_false_for_a_lead_that_was_never_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "leads.csv"
-            with path.open("w", newline="") as f:
-                writer = csv.DictWriter(f, fieldnames=["company_name", "phone"])
-                writer.writeheader()
-                writer.writerow({"company_name": "A", "phone": "111"})
-            self.assertFalse(undelete_lead(path, "111"))
+            db_path = Path(tmp) / "leads.db"
+            db.insert_if_new(db_path, {"company_name": "A", "phone": "111"})
+            self.assertFalse(undelete_lead(db_path, "111"))
 
     def test_returns_false_for_an_unknown_phone(self):
         with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "leads.csv"
-            with path.open("w", newline="") as f:
-                writer = csv.DictWriter(f, fieldnames=["company_name", "phone"])
-                writer.writeheader()
-                writer.writerow({"company_name": "A", "phone": "111"})
-            self.assertFalse(undelete_lead(path, "999"))
+            db_path = Path(tmp) / "leads.db"
+            db.insert_if_new(db_path, {"company_name": "A", "phone": "111"})
+            self.assertFalse(undelete_lead(db_path, "999"))
 
 
 class UpdateLeadTests(unittest.TestCase):
     def test_sets_only_the_given_fields_on_the_matching_row(self):
         with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "leads.csv"
-            with path.open("w", newline="") as f:
-                writer = csv.DictWriter(f, fieldnames=["company_name", "phone", "status", "notes"])
-                writer.writeheader()
-                writer.writerow({"company_name": "A", "phone": "111", "status": "", "notes": ""})
-            self.assertTrue(update_lead(path, "111", {"status": "Interested"}))
-            with path.open() as f:
-                row = next(csv.DictReader(f))
+            db_path = Path(tmp) / "leads.db"
+            db.insert_if_new(db_path, {"company_name": "A", "phone": "111"})
+            self.assertTrue(update_lead(db_path, "111", {"status": "Interested"}))
+            row = db.all_leads(db_path)[0]
         self.assertEqual(row["status"], "Interested")
         self.assertEqual(row["notes"], "")
 
     def test_returns_false_for_an_unknown_phone(self):
         with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "leads.csv"
-            with path.open("w", newline="") as f:
-                writer = csv.DictWriter(f, fieldnames=["company_name", "phone"])
-                writer.writeheader()
-                writer.writerow({"company_name": "A", "phone": "111"})
-            self.assertFalse(update_lead(path, "999", {"status": "Interested"}))
-
-
-class ConcurrentWriteTests(unittest.TestCase):
-    """Regression tests for the race the review reproduced live: the scraper subprocess appends a
-    row between the web app's read and its rewrite of the whole file, and the app's write -- based
-    on a now-stale snapshot -- silently erases the row the scraper just added. update_lead/
-    delete_lead and the scraper's per-row write now share one lock (lead_scraper.locked) around
-    exactly that window, so whichever one gets there first, the other must wait its turn rather
-    than working from a stale read."""
-
-    def test_a_concurrent_append_is_not_erased_by_an_interleaved_edit(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "leads.csv"
-            with path.open("w", newline="") as f:
-                writer = csv.DictWriter(f, fieldnames=["company_name", "phone", "status"])
-                writer.writeheader()
-                writer.writerow({"company_name": "Existing Co", "phone": "111", "status": ""})
-
-            holding_lock = threading.Event()
-
-            def scraper_append():
-                with locked(path):
-                    holding_lock.set()
-                    time.sleep(0.1)  # long enough that update_lead below must wait, not race
-                    with path.open("a", newline="") as f:
-                        csv.DictWriter(f, fieldnames=["company_name", "phone", "status"]).writerow(
-                            {"company_name": "Freshly Scraped Co", "phone": "222", "status": ""})
-
-            t = threading.Thread(target=scraper_append)
-            t.start()
-            holding_lock.wait(timeout=2)
-            self.assertTrue(update_lead(path, "111", {"status": "Interested"}))
-            t.join(timeout=2)
-
-            with path.open() as f:
-                rows = list(csv.DictReader(f))
-        self.assertEqual({r["phone"] for r in rows}, {"111", "222"})
-        self.assertEqual(next(r for r in rows if r["phone"] == "111")["status"], "Interested")
-
-    def test_locked_is_mutually_exclusive_across_threads(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "leads.csv"
-            order = []
-
-            def hold_and_record(label, hold_seconds):
-                with locked(path):
-                    order.append(f"{label}-start")
-                    time.sleep(hold_seconds)
-                    order.append(f"{label}-end")
-
-            t1 = threading.Thread(target=hold_and_record, args=("first", 0.1))
-            t1.start()
-            time.sleep(0.02)  # ensure t1 grabs the lock first
-            t2 = threading.Thread(target=hold_and_record, args=("second", 0))
-            t2.start()
-            t1.join(timeout=2)
-            t2.join(timeout=2)
-        # If the lock weren't exclusive, "second-start" could land between "first-start" and
-        # "first-end". It must not: first has to fully finish before second ever starts.
-        self.assertEqual(order, ["first-start", "first-end", "second-start", "second-end"])
+            db_path = Path(tmp) / "leads.db"
+            db.insert_if_new(db_path, {"company_name": "A", "phone": "111"})
+            self.assertFalse(update_lead(db_path, "999", {"status": "Interested"}))
 
 
 class BackupSchedulingTests(unittest.TestCase):
@@ -279,14 +186,14 @@ class BackupSchedulingTests(unittest.TestCase):
                 app._sync_timer = None
         app.backup_state["error"] = None
 
-    @patch("app.sync_leads.sync", return_value=None)
+    @patch("app.db.sync_backup", return_value=None)
     def test_a_successful_sync_clears_any_previous_error(self, mock_sync):
         app.backup_state["error"] = "old failure"
         app._run_sync()
         self.assertIsNone(app.backup_state["error"])
-        mock_sync.assert_called_once_with(app.LEADS_PATH)
+        mock_sync.assert_called_once_with(app.DB_PATH)
 
-    @patch("app.sync_leads.sync", return_value="Google Sheets push failed: HTTP 500")
+    @patch("app.db.sync_backup", return_value="Google Sheets push failed: HTTP 500")
     def test_a_failed_sync_is_recorded_and_schedules_a_retry(self, mock_sync):
         app._run_sync()
         self.assertEqual(app.backup_state["error"], "Google Sheets push failed: HTTP 500")
@@ -299,7 +206,7 @@ class BackupSchedulingTests(unittest.TestCase):
             self.assertIsNotNone(app._sync_timer)
 
     def test_a_new_edit_supersedes_a_pending_retry_instead_of_stacking(self):
-        with patch("app.sync_leads.sync", return_value="boom"):
+        with patch("app.db.sync_backup", return_value="boom"):
             app._run_sync()
         with app.lock:
             first_timer = app._sync_timer

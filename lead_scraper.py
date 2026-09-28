@@ -2,14 +2,11 @@
 
 Uses the free Overpass API (no key needed). One run covers the whole U.S.: the free
 Overpass server can't answer a single nationwide query (it times out), so the search is
-split into 50 states + DC internally. Businesses that publish a phone number are appended
-to a single CSV, deduped by phone number.
+split into 50 states + DC internally. Businesses that publish a phone number are saved to
+a SQLite database (db.py), deduped by phone number (the database's primary key).
 """
 import argparse
-import contextlib
-import csv
 import concurrent.futures
-import fcntl
 import re
 import sys
 import time
@@ -22,7 +19,7 @@ import requests
 import socket
 import urllib3.util.connection as urllib3_connection
 
-import sync_leads
+import db
 
 # Force IPv4: Render's containers (and some other small hosts) have no outbound IPv6 route, but
 # these Overpass mirrors publish IPv6 addresses too. Left to its own devices, Python sometimes tries
@@ -39,9 +36,6 @@ USER_AGENT = "TrashLeadGen/0.1 (+https://github.com/brockmichaelfuller/TrashLead
 REQUEST_DELAY_SECONDS = 5
 MAX_ATTEMPTS = 4  # cycles through all 3 mirrors at least once, then retries the first again
 QUERY_TIMEOUT_SECONDS = 300
-
-COLUMNS = ["company_name", "phone", "email", "website", "address", "city", "state", "timezone", "source",
-           "date_collected", "status", "notes", "rejected_at"]
 
 NAME_KEYWORDS = ["waste", "garbage", "trash", "refuse", "disposal", "rubbish"]
 NAME_REGEX = "|".join(NAME_KEYWORDS)
@@ -124,8 +118,8 @@ def is_complete(row):
 
 def is_rejected(row):
     """True once a lead has been deleted as the wrong business type (see app.py's delete_lead).
-    The row is kept rather than removed so its phone stays in load_existing_phones()'s "seen" set
-    forever, instead of being treated as new and re-added on a later scrape."""
+    The row is kept rather than removed so its phone stays in db.existing_phones()'s result forever,
+    instead of being treated as new and re-added on a later scrape."""
     return bool((row.get("rejected_at") or "").strip())
 
 # Fallback when a lead has no coordinates: the state's main timezone (split states use where most people live).
@@ -286,78 +280,6 @@ def fetch_elements(state_code):
     raise RuntimeError(f"Overpass failed after {MAX_ATTEMPTS} attempts:\n" + "\n".join(errors))
 
 
-@contextlib.contextmanager
-def locked(path):
-    """Exclusive advisory lock on `path`, held for the duration of the block. Serializes writes
-    between whichever processes touch the CSV -- this scraper subprocess appending rows and the web
-    app's read-modify-write per edit -- so one can never silently erase a row the other just wrote.
-    (Reproduced live: an edit that read the file the instant before the scraper's append landed,
-    then wrote back its own now-stale snapshot, wiping that new row out from under it.) Uses a
-    separate ".lock" file rather than locking the CSV itself, so this never risks truncating or
-    otherwise disturbing the data file regardless of which process gets here first."""
-    lock_path = path.with_name(path.name + ".lock")
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    with lock_path.open("a") as f:
-        fcntl.flock(f, fcntl.LOCK_EX)
-        try:
-            yield
-        finally:
-            fcntl.flock(f, fcntl.LOCK_UN)
-
-
-def load_existing_phones(path):
-    """Phones already saved in the CSV, normalized so old rows in other formats still match."""
-    if not path.exists():
-        return set()
-    with path.open(newline="", encoding="utf-8") as f:
-        return {normalize_phone(row.get("phone")) or row.get("phone") for row in csv.DictReader(f)}
-
-
-def ensure_columns(path):
-    """Upgrade an older CSV in place so its header matches COLUMNS (missing fields left blank)."""
-    if not path.exists() or path.stat().st_size == 0:
-        return
-    with locked(path):
-        with path.open(newline="", encoding="utf-8") as f:
-            reader = csv.DictReader(f)
-            if reader.fieldnames == COLUMNS:
-                return
-            rows = list(reader)
-        with path.open("w", newline="", encoding="utf-8") as f:
-            writer = csv.DictWriter(f, fieldnames=COLUMNS, extrasaction="ignore", restval="")
-            writer.writeheader()
-            writer.writerows(rows)
-
-
-def dedupe_by_phone(path):
-    """Collapse to one row per phone number (first occurrence wins). Multiple app instances/scrapes
-    can overlap around a redeploy (each restores its own snapshot from the backup, doesn't see the
-    other's writes, and both decide the same business is "new"), which can leave exact duplicate
-    rows behind -- this is the self-healing cleanup for that, safe to call any time. Returns whether
-    anything changed."""
-    if not path.exists():
-        return False
-    with locked(path):
-        with path.open(newline="", encoding="utf-8") as f:
-            reader = csv.DictReader(f)
-            fieldnames = reader.fieldnames
-            rows = list(reader)
-        seen_phones, deduped = set(), []
-        for row in rows:
-            phone = row.get("phone")
-            if phone in seen_phones:
-                continue
-            seen_phones.add(phone)
-            deduped.append(row)
-        if len(deduped) == len(rows):
-            return False
-        with path.open("w", newline="", encoding="utf-8") as f:
-            writer = csv.DictWriter(f, fieldnames=fieldnames)
-            writer.writeheader()
-            writer.writerows(deduped)
-    return True
-
-
 UNREACHABLE_ERROR_MESSAGE = "couldn't connect to the map data source"
 
 
@@ -406,12 +328,12 @@ RETRY_ROUND_DELAY_SECONDS = 30
 CONSECUTIVE_UNREACHABLE_ABORT_THRESHOLD = 2
 
 
-def _attempt_state(state, writer, out, output_path, seen, today):
+def _attempt_state(state, db_path, seen, today):
     """Fetch, write, and back up one state. Returns (new_count, error); error is None on success.
     Everything is inside one try, so a failure anywhere in it -- not just the network call -- can
     never kill the whole run; worst case this one state comes back as a failure to retry."""
     try:
-        seen.update(load_existing_phones(output_path))  # pick up rows another scraper added meanwhile
+        seen.update(db.existing_phones(db_path))  # pick up rows another scraper added meanwhile
         elements = fetch_elements(state)
         candidates, candidate_phones = [], set()
         for element in elements:
@@ -427,100 +349,88 @@ def _attempt_state(state, writer, out, output_path, seen, today):
             keep_flags = pool.map(lambda row: website_offers_residential_pickup(row["website"]), candidates)
         new = 0
         for row, keep in zip(candidates, keep_flags):
-            if keep:
+            # insert_if_new's primary-key constraint is the real guarantee against a duplicate --
+            # not the `seen` set above, which is just there to skip a repeat website check.
+            if keep and db.insert_if_new(db_path, row):
                 seen.add(row["phone"])
-                # Locked so a web-app edit's read-modify-write can never land between this write and
-                # its flush and then overwrite this row with a stale, pre-write snapshot of the file.
-                with locked(output_path):
-                    writer.writerow(row)
-                    out.flush()  # keep progress if the run is interrupted later
                 new += 1
-        sync_leads.sync(output_path)  # and back it up, since a restart wipes the local disk
+        db.sync_backup(db_path)  # and back it up, since a restart wipes the local disk
         return new, None
     except Exception as error:  # one bad state must not stop the run
         return 0, error
 
 
-def run(output_path, states):
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    sync_leads.restore(output_path)  # recover prior runs' data on a fresh (empty) host
-    ensure_columns(output_path)
-    if dedupe_by_phone(output_path):  # clean up anything an overlapping run/restore duplicated
-        sync_leads.sync(output_path)
-    seen = load_existing_phones(output_path)
-    write_header = not output_path.exists() or output_path.stat().st_size == 0
+def run(db_path, states):
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    db.restore_if_empty(db_path)
+    seen = db.existing_phones(db_path)
     today = date.today().isoformat()
     total_new = 0
 
-    with output_path.open("a", newline="", encoding="utf-8") as out:
-        writer = csv.DictWriter(out, fieldnames=COLUMNS)
-        if write_header:
-            writer.writeheader()
-
-        remaining = list(states)
-        consecutive_unreachable = 0
-        aborted_early = False
-        for round_num in range(1, RETRY_ROUNDS + 1):
-            still_failing = []
-            for i, state in enumerate(remaining):
-                # This whole iteration -- not just _attempt_state's own internals -- must be unable
-                # to kill the run. It wasn't: the logging/sleep below used to sit outside any try, so
-                # a failure here (hit live) crashed the process after only 2 of 13 states with no
-                # explanation, the same class of bug _attempt_state itself was built to prevent.
-                try:
-                    new, error = _attempt_state(state, writer, out, output_path, seen, today)
-                    if error is None:
-                        total_new += new
-                        consecutive_unreachable = 0
-                        label = f"[{i + 1}/{len(remaining)}]" if round_num == 1 else "retry succeeded:"
-                        print(f"{label} {state}: {new} new companies")
-                    else:
-                        message = _friendly_error(error)
-                        label = f"[{i + 1}/{len(remaining)}]" if round_num == 1 else "still failing after retry:"
-                        print(f"{label} {state}: skipped -- {message}", file=sys.stderr)
-                        log_debug_detail(output_path, state, error)  # the real exception, for /api/debug.log
-                        still_failing.append(state)                  # -- never shown in the user-facing log
-                        consecutive_unreachable = consecutive_unreachable + 1 if message == UNREACHABLE_ERROR_MESSAGE else 0
-                    time.sleep(REQUEST_DELAY_SECONDS)
-                except Exception as error:
-                    # Same [i/n]-style prefix as the two branches above, so this line matches
-                    # STATE_OUTCOME_RE too -- without it, a state failing here (the logging/sleep
-                    # code, not _attempt_state itself) went missing from the retry button entirely,
-                    # since app.py's parsing only recognized the other two branches' formats.
-                    label = f"[{i + 1}/{len(remaining)}]" if round_num == 1 else "still failing after retry:"
-                    print(f"{label} {state}: skipped -- the map data source had a temporary problem", file=sys.stderr)
-                    log_debug_detail(output_path, state, error)
-                    still_failing.append(state)
-                    consecutive_unreachable = 0
-                # A handful of states in a row that can't even connect (not just slow/busy/blocked)
-                # means the data source itself is unreachable from here -- grinding through every
-                # remaining state at several minutes each just to report the same thing N more times
-                # helps no one. Whatever's left of this run stays unattempted (shown as "not reached",
-                # the same status a Stop click leaves behind) rather than getting the full retry cycle.
-                if consecutive_unreachable >= CONSECUTIVE_UNREACHABLE_ABORT_THRESHOLD:
-                    print(f"Can't reach the map data service after {consecutive_unreachable} states in a row -- "
-                          "stopping early instead of waiting on the rest. Check the connection and try again.",
-                          file=sys.stderr)
-                    aborted_early = True
-                    break
-            remaining = still_failing
-            if aborted_early or not remaining or round_num == RETRY_ROUNDS:
-                break
+    remaining = list(states)
+    consecutive_unreachable = 0
+    aborted_early = False
+    for round_num in range(1, RETRY_ROUNDS + 1):
+        still_failing = []
+        for i, state in enumerate(remaining):
+            # This whole iteration -- not just _attempt_state's own internals -- must be unable
+            # to kill the run. It wasn't: the logging/sleep below used to sit outside any try, so
+            # a failure here (hit live) crashed the process after only 2 of 13 states with no
+            # explanation, the same class of bug _attempt_state itself was built to prevent.
             try:
-                print(f"{len(remaining)} state(s) had a temporary problem -- retrying automatically "
-                      f"in {RETRY_ROUND_DELAY_SECONDS}s: {', '.join(remaining)}")
-                time.sleep(RETRY_ROUND_DELAY_SECONDS)
-            except Exception:
-                pass
+                new, error = _attempt_state(state, db_path, seen, today)
+                if error is None:
+                    total_new += new
+                    consecutive_unreachable = 0
+                    label = f"[{i + 1}/{len(remaining)}]" if round_num == 1 else "retry succeeded:"
+                    print(f"{label} {state}: {new} new companies")
+                else:
+                    message = _friendly_error(error)
+                    label = f"[{i + 1}/{len(remaining)}]" if round_num == 1 else "still failing after retry:"
+                    print(f"{label} {state}: skipped -- {message}", file=sys.stderr)
+                    log_debug_detail(db_path, state, error)  # the real exception, for /api/debug.log
+                    still_failing.append(state)              # -- never shown in the user-facing log
+                    consecutive_unreachable = consecutive_unreachable + 1 if message == UNREACHABLE_ERROR_MESSAGE else 0
+                time.sleep(REQUEST_DELAY_SECONDS)
+            except Exception as error:
+                # Same [i/n]-style prefix as the two branches above, so this line matches
+                # STATE_OUTCOME_RE too -- without it, a state failing here (the logging/sleep
+                # code, not _attempt_state itself) went missing from the retry button entirely,
+                # since app.py's parsing only recognized the other two branches' formats.
+                label = f"[{i + 1}/{len(remaining)}]" if round_num == 1 else "still failing after retry:"
+                print(f"{label} {state}: skipped -- the map data source had a temporary problem", file=sys.stderr)
+                log_debug_detail(db_path, state, error)
+                still_failing.append(state)
+                consecutive_unreachable = 0
+            # A handful of states in a row that can't even connect (not just slow/busy/blocked)
+            # means the data source itself is unreachable from here -- grinding through every
+            # remaining state at several minutes each just to report the same thing N more times
+            # helps no one. Whatever's left of this run stays unattempted (shown as "not reached",
+            # the same status a Stop click leaves behind) rather than getting the full retry cycle.
+            if consecutive_unreachable >= CONSECUTIVE_UNREACHABLE_ABORT_THRESHOLD:
+                print(f"Can't reach the map data service after {consecutive_unreachable} states in a row -- "
+                      "stopping early instead of waiting on the rest. Check the connection and try again.",
+                      file=sys.stderr)
+                aborted_early = True
+                break
+        remaining = still_failing
+        if aborted_early or not remaining or round_num == RETRY_ROUNDS:
+            break
+        try:
+            print(f"{len(remaining)} state(s) had a temporary problem -- retrying automatically "
+                  f"in {RETRY_ROUND_DELAY_SECONDS}s: {', '.join(remaining)}")
+            time.sleep(RETRY_ROUND_DELAY_SECONDS)
+        except Exception:
+            pass
 
-    print(f"Done. {total_new} new rows -> {output_path} ({len(seen)} total unique phones)")
+    print(f"Done. {total_new} new rows -> {db_path} ({len(seen)} total unique phones)")
     if remaining:
         print(f"Failed states (rerun to retry): {', '.join(remaining)}", file=sys.stderr)
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--output", type=Path, default=Path("output/leads.csv"))
+    parser.add_argument("--output", type=Path, default=Path("output/leads.db"))
     parser.add_argument("--states", nargs="+", default=STATES, metavar="ST",
                         help="limit the run to these state codes, e.g. --states CO WA")
     args = parser.parse_args()

@@ -1,14 +1,14 @@
-import csv
 import re
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import db
 import lead_scraper
 from lead_scraper import (STATE_GROUPS, STATES, UNREACHABLE_ERROR_MESSAGE, _friendly_error, clean_email,
-                           dedupe_by_phone, element_to_row, is_complete, is_rejected, missing_fields,
-                           load_existing_phones, normalize_phone, run, website_offers_residential_pickup)
+                           element_to_row, is_complete, is_rejected, missing_fields, normalize_phone, run,
+                           website_offers_residential_pickup)
 
 
 class NormalizePhoneTests(unittest.TestCase):
@@ -178,21 +178,6 @@ class MoreTests(unittest.TestCase):
         self.assertIsNotNone(element_to_row({"type": "node", "id": 1, "tags": tags}, "CO", "x"))
 
 
-class ExistingPhonesTests(unittest.TestCase):
-    def test_existing_rows_match_regardless_of_phone_format(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "leads.csv"
-            with path.open("w", newline="") as f:
-                writer = csv.DictWriter(f, fieldnames=["company_name", "phone"])
-                writer.writeheader()
-                writer.writerow({"company_name": "A", "phone": "303-343-7096"})
-                writer.writerow({"company_name": "B", "phone": "(480) 400-3393"})
-            phones = load_existing_phones(path)
-            self.assertIn("(303) 343-7096", phones)
-            self.assertIn("(480) 400-3393", phones)
-            self.assertEqual(load_existing_phones(Path(tmp) / "missing.csv"), set())
-
-
 class RequiredFieldsTests(unittest.TestCase):
     def test_lead_needs_name_phone_email_and_timezone(self):
         full = {"company_name": "A Waste", "phone": "(303) 343-7096", "email": "a@b.com", "timezone": "Mountain"}
@@ -244,7 +229,10 @@ class RunResilienceTests(unittest.TestCase):
     """Hit live: a failure past the network fetch (in this case, the backup sync step) crashed the
     whole run instead of just skipping that one state, because only fetch_elements() was wrapped in
     a try/except. The whole per-state body is wrapped now -- this proves a state that raises partway
-    through doesn't stop the next one from being processed."""
+    through doesn't stop the next one from being processed.
+
+    sync_leads is imported by db.py (which lead_scraper.py's run()/_attempt_state now delegate backup
+    to), not by lead_scraper.py itself -- so these patch db.sync_leads, not lead_scraper.sync_leads."""
 
     def test_a_failure_after_a_successful_fetch_does_not_abort_the_run(self):
         elements = {
@@ -252,28 +240,28 @@ class RunResilienceTests(unittest.TestCase):
             "WY": [{"type": "node", "id": 2, "tags": {"name": "Rocky Mountain Waste", "phone": "307-555-0100"}}],
         }
         with tempfile.TemporaryDirectory() as tmp:
-            output_path = Path(tmp) / "leads.csv"
+            db_path = Path(tmp) / "leads.db"
             # CO's backup sync blows up on round 1, then succeeds on the automatic retry round; WY
-            # is fine throughout.
+            # is fine throughout. insert_if_new already landed the row before sync_backup is called,
+            # so a sync failure doesn't lose the row -- it just gets logged as this state failing.
             with patch("lead_scraper.fetch_elements", side_effect=lambda state: elements[state]), \
-                 patch.object(lead_scraper.sync_leads, "restore"), \
-                 patch.object(lead_scraper.sync_leads, "sync",
+                 patch.object(db.sync_leads, "restore"), \
+                 patch.object(db.sync_leads, "sync",
                                side_effect=[RuntimeError("simulated backup failure"), None, None]), \
                  patch("lead_scraper.time.sleep"):
-                run(output_path, ["CO", "WY"])  # must not raise
-            with output_path.open() as f:
-                rows = list(csv.DictReader(f))
+                run(db_path, ["CO", "WY"])  # must not raise
+            rows = db.all_leads(db_path)
         self.assertEqual({r["company_name"] for r in rows}, {"Acme Waste", "Rocky Mountain Waste"})
 
     def test_a_state_that_fails_every_round_ends_up_in_the_final_failed_summary(self):
         with tempfile.TemporaryDirectory() as tmp:
-            output_path = Path(tmp) / "leads.csv"
+            db_path = Path(tmp) / "leads.db"
             with patch("lead_scraper.fetch_elements", side_effect=RuntimeError("still down")), \
-                 patch.object(lead_scraper.sync_leads, "restore"), \
-                 patch.object(lead_scraper.sync_leads, "sync"), \
+                 patch.object(db.sync_leads, "restore"), \
+                 patch.object(db.sync_leads, "sync"), \
                  patch("lead_scraper.time.sleep"), \
                  patch("builtins.print") as mock_print:
-                run(output_path, ["CO"])
+                run(db_path, ["CO"])
         summary_lines = [c.args[0] for c in mock_print.call_args_list if c.args]
         self.assertTrue(any("Failed states (rerun to retry): CO" in line for line in summary_lines), summary_lines)
 
@@ -283,13 +271,13 @@ class RunResilienceTests(unittest.TestCase):
         # times. A handful of connection-refused states in a row means the service is unreachable
         # from here entirely, not just having a rough moment for one state -- stop early instead.
         with tempfile.TemporaryDirectory() as tmp:
-            output_path = Path(tmp) / "leads.csv"
+            db_path = Path(tmp) / "leads.db"
             with patch("lead_scraper.fetch_elements", side_effect=ConnectionError("Connection refused")), \
-                 patch.object(lead_scraper.sync_leads, "restore"), \
-                 patch.object(lead_scraper.sync_leads, "sync"), \
+                 patch.object(db.sync_leads, "restore"), \
+                 patch.object(db.sync_leads, "sync"), \
                  patch("lead_scraper.time.sleep"), \
                  patch("builtins.print") as mock_print:
-                run(output_path, ["AL", "AK", "AZ", "AR"])
+                run(db_path, ["AL", "AK", "AZ", "AR"])
         printed = [c.args[0] for c in mock_print.call_args_list if c.args]
         state_re = re.compile(r"^(?:\[\d+/\d+\]|still failing after retry:) (\S+): skipped")
         attempted = {m.group(1) for line in printed for m in [state_re.match(line)] if m}
@@ -300,13 +288,13 @@ class RunResilienceTests(unittest.TestCase):
         # A busy/blocked/slow response is a different situation from "unreachable" -- these must not
         # trip the same early-abort, or a run would give up after any two ordinary failures.
         with tempfile.TemporaryDirectory() as tmp:
-            output_path = Path(tmp) / "leads.csv"
+            db_path = Path(tmp) / "leads.db"
             with patch("lead_scraper.fetch_elements", side_effect=TimeoutError("timed out")), \
-                 patch.object(lead_scraper.sync_leads, "restore"), \
-                 patch.object(lead_scraper.sync_leads, "sync"), \
+                 patch.object(db.sync_leads, "restore"), \
+                 patch.object(db.sync_leads, "sync"), \
                  patch("lead_scraper.time.sleep"), \
                  patch("builtins.print") as mock_print:
-                run(output_path, ["AL", "AK", "AZ", "AR"])
+                run(db_path, ["AL", "AK", "AZ", "AR"])
         printed = [c.args[0] for c in mock_print.call_args_list if c.args]
         state_re = re.compile(r"^(?:\[\d+/\d+\]|still failing after retry:) (\S+): skipped")
         attempted = {m.group(1) for line in printed for m in [state_re.match(line)] if m}
@@ -318,7 +306,7 @@ class RunResilienceTests(unittest.TestCase):
         # the whole run after only 2 of 13 states with no explanation. This reproduces that failure
         # mode directly -- log_debug_detail raising for AL -- and proves AK still gets processed.
         with tempfile.TemporaryDirectory() as tmp:
-            output_path = Path(tmp) / "leads.csv"
+            db_path = Path(tmp) / "leads.db"
             calls = []
 
             def flaky_log_debug_detail(*args):
@@ -328,11 +316,11 @@ class RunResilienceTests(unittest.TestCase):
 
             with patch("lead_scraper.fetch_elements", side_effect=RuntimeError("boom")), \
                  patch("lead_scraper.log_debug_detail", side_effect=flaky_log_debug_detail), \
-                 patch.object(lead_scraper.sync_leads, "restore"), \
-                 patch.object(lead_scraper.sync_leads, "sync"), \
+                 patch.object(db.sync_leads, "restore"), \
+                 patch.object(db.sync_leads, "sync"), \
                  patch("lead_scraper.time.sleep"), \
                  patch("builtins.print") as mock_print:
-                run(output_path, ["AL", "AK"])  # must not raise despite AL's logging call blowing up
+                run(db_path, ["AL", "AK"])  # must not raise despite AL's logging call blowing up
         printed_states = {c.args[0].split(":")[0].split()[-1] for c in mock_print.call_args_list
                           if c.args and "skipped" in c.args[0]}
         self.assertIn("AK", printed_states)  # AK was still reached after AL's crash
@@ -394,40 +382,6 @@ class WebsiteResidentialPickupCheckTests(unittest.TestCase):
         with patch("lead_scraper.requests.get", return_value=_mock_html_response(huge)):
             # Kept unverified is fine here -- the point is it returns promptly, not which way it goes.
             website_offers_residential_pickup("https://example.com")
-
-
-class DedupeByPhoneTests(unittest.TestCase):
-    """Hit live: an overlapping scrape/restore around a redeploy left the same business duplicated
-    many times over (each instance restored its own snapshot, didn't see what the other wrote, and
-    both decided the business was "new"). This is the self-healing cleanup for that."""
-
-    def test_collapses_duplicate_phones_keeping_the_first(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "leads.csv"
-            with path.open("w", newline="") as f:
-                writer = csv.DictWriter(f, fieldnames=["company_name", "phone"])
-                writer.writeheader()
-                writer.writerow({"company_name": "Acme Waste", "phone": "555"})
-                writer.writerow({"company_name": "Other Co", "phone": "111"})
-                writer.writerow({"company_name": "Acme Waste", "phone": "555"})
-                writer.writerow({"company_name": "Acme Waste", "phone": "555"})
-            self.assertTrue(dedupe_by_phone(path))
-            with path.open() as f:
-                rows = list(csv.DictReader(f))
-        self.assertEqual([r["phone"] for r in rows], ["555", "111"])
-
-    def test_returns_false_when_there_is_nothing_to_collapse(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "leads.csv"
-            with path.open("w", newline="") as f:
-                writer = csv.DictWriter(f, fieldnames=["company_name", "phone"])
-                writer.writeheader()
-                writer.writerow({"company_name": "A", "phone": "111"})
-            self.assertFalse(dedupe_by_phone(path))
-
-    def test_returns_false_when_the_file_does_not_exist(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            self.assertFalse(dedupe_by_phone(Path(tmp) / "missing.csv"))
 
 
 if __name__ == "__main__":
