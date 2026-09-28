@@ -143,9 +143,12 @@ class SheetsEnabledTests(unittest.TestCase):
 
     @patch.dict("os.environ", {"GOOGLE_SHEET_ID": "sheet123", "GOOGLE_SERVICE_ACCOUNT_JSON": "x"}, clear=True)
     @patch("sync_leads._sheets_session_or_none")
-    def test_push_leaves_out_rejected_leads(self, mock_session_fn):
-        # Rejected rows (see app.py's delete_lead) stay in the CSV forever so the scraper never
-        # re-adds them, but they have no reason to show up in the sheet.
+    def test_push_puts_rejected_leads_in_their_own_final_section_not_dropped(self, mock_session_fn):
+        # Rejected rows must still be *in* the pushed sheet somewhere, not dropped -- restoring from
+        # Sheets is this app's only backup once GitHub is unconfigured, and a rejected lead pushed
+        # nowhere would silently come back as new-and-unrejected after the next cold start (see
+        # RestoreRoundTripTests below). They get their own section, out of the way, instead of
+        # mixing in with real leads.
         mock_session = MagicMock()
         mock_session.put.return_value = MagicMock(status_code=200)
         mock_session_fn.return_value = mock_session
@@ -153,14 +156,16 @@ class SheetsEnabledTests(unittest.TestCase):
             path = Path(tmp) / "leads.csv"
             with path.open("w", newline="") as f:
                 writer = csv.writer(f)
-                writer.writerow(["company_name", "phone", "rejected_at"])
-                writer.writerow(["Keep Co", "1", ""])
-                writer.writerow(["Junk Removal Co", "2", "2026-09-24"])
+                writer.writerow(["company_name", "phone", "email", "timezone", "rejected_at"])
+                writer.writerow(["Keep Co", "1", "a@b.com", "CST", ""])
+                writer.writerow(["Junk Removal Co", "2", "c@d.com", "CST", "2026-09-24"])
             sync_leads.push_sheets(path)
         sent_values = mock_session.put.call_args.kwargs["json"]["values"]
         self.assertEqual(sent_values, [
-            ["company_name", "phone", "rejected_at"],
-            ["Keep Co", "1", ""],
+            ["company_name", "phone", "email", "timezone", "rejected_at"],
+            ["Keep Co", "1", "a@b.com", "CST", ""],
+            [],
+            ["Junk Removal Co", "2", "c@d.com", "CST", "2026-09-24"],
         ])
 
     @patch.dict("os.environ", {"GOOGLE_SHEET_ID": "sheet123", "GOOGLE_SERVICE_ACCOUNT_JSON": "x"}, clear=True)
@@ -250,6 +255,41 @@ class SheetsEnabledTests(unittest.TestCase):
             with path.open() as f:
                 rows = list(csv.DictReader(f))
         self.assertEqual([r["company_name"] for r in rows], ["A", "B"])
+
+    def test_push_then_pull_preserves_a_rejected_lead(self):
+        # End-to-end proof of the actual bug: a rejected lead must survive a full push-then-pull
+        # round trip through Sheets, since that's exactly what a cold Render restart does when
+        # GitHub backup is unconfigured. If it didn't, the lead would come back looking brand new
+        # to the scraper and get re-added -- silently undoing the delete.
+        with patch.dict("os.environ", {"GOOGLE_SHEET_ID": "sheet123", "GOOGLE_SERVICE_ACCOUNT_JSON": "x"}, clear=True), \
+             patch("sync_leads._sheets_session_or_none") as mock_session_fn:
+            mock_session = MagicMock()
+            mock_session.put.return_value = MagicMock(status_code=200)
+            mock_session_fn.return_value = mock_session
+            with tempfile.TemporaryDirectory() as tmp:
+                push_path = Path(tmp) / "leads.csv"
+                with push_path.open("w", newline="") as f:
+                    writer = csv.writer(f)
+                    writer.writerow(["company_name", "phone", "email", "timezone", "rejected_at"])
+                    writer.writerow(["Keep Co", "1", "a@b.com", "CST", ""])
+                    writer.writerow(["Junk Removal Co", "2", "c@d.com", "CST", "2026-09-24"])
+                sync_leads.push_sheets(push_path)
+            pushed_values = mock_session.put.call_args.kwargs["json"]["values"]
+
+        with patch.dict("os.environ", {"GOOGLE_SHEET_ID": "sheet123", "GOOGLE_SERVICE_ACCOUNT_JSON": "x"}, clear=True), \
+             patch("sync_leads._sheets_session_or_none") as mock_session_fn2:
+            mock_session2 = MagicMock()
+            mock_session2.get.return_value = MagicMock(status_code=200, json=lambda: {"values": pushed_values})
+            mock_session_fn2.return_value = mock_session2
+            with tempfile.TemporaryDirectory() as tmp:
+                pull_path = Path(tmp) / "leads.csv"
+                sync_leads.pull_sheets(pull_path)
+                with pull_path.open() as f:
+                    rows = list(csv.DictReader(f))
+
+        by_phone = {r["phone"]: r for r in rows}
+        self.assertEqual(set(by_phone), {"1", "2"})
+        self.assertEqual(by_phone["2"]["rejected_at"], "2026-09-24")
 
 
 class RestoreTests(unittest.TestCase):

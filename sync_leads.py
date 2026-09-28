@@ -36,14 +36,20 @@ COMPLETE_FIELDS = ("company_name", "phone", "email", "timezone")
 # Sections shown in the sheet, top to bottom, each separated by a blank row. A lead with no status
 # yet (the normal state right after scraping) sits first since it's what still needs a decision;
 # any status that isn't one of these (shouldn't happen -- the site's dropdown only offers these
-# four) is grouped last rather than dropped.
+# four) is grouped last rather than dropped. Rejected leads (see is_rejected) always get their own
+# section after all of these, regardless of status -- see _group_and_sort.
 STATUS_SECTIONS = ["", "Interested", "Not interested", "Do not contact"]
 
 
 def _group_and_sort(rows):
     """Reorder CSV data rows (header stays first) into per-status sections in STATUS_SECTIONS
     order, each separated by a blank row, with complete leads (see COMPLETE_FIELDS) grouped first
-    within every section. If there's no "status" column, falls back to just a complete-first sort."""
+    within every section. If there's no "status" column, falls back to just a complete-first sort.
+
+    Rejected leads (rejected_at set) always land in their own final section instead of mixing in --
+    they still have to actually be *in* the sheet, not dropped from it: restoring from Sheets is the
+    only backup this app has once GitHub is unconfigured, and a rejected lead that's pushed nowhere
+    would come back as new-and-unrejected after the next cold start, silently undoing the deletion."""
     if len(rows) < 2:
         return rows
     header, data = rows[0], rows[1:]
@@ -54,21 +60,38 @@ def _group_and_sort(rows):
     def is_complete(row):
         return all(idx < len(row) and row[idx].strip() for idx in complete_indexes)
 
+    rejected_idx = header.index("rejected_at") if "rejected_at" in header else None
+    def is_rejected_row(row):
+        return rejected_idx is not None and rejected_idx < len(row) and bool(row[rejected_idx].strip())
+
     if "status" not in header:
-        return [header] + sorted(data, key=lambda row: not is_complete(row))
+        groups = [sorted([row for row in data if not is_rejected_row(row)], key=lambda row: not is_complete(row)),
+                  sorted([row for row in data if is_rejected_row(row)], key=lambda row: not is_complete(row))]
+        groups = [group for group in groups if group]
+        result = [header]
+        for i, group in enumerate(groups):
+            if i > 0:
+                result.append([])
+            result.extend(group)
+        return result
 
     status_idx = header.index("status")
     def status_of(row):
         return row[status_idx].strip() if status_idx < len(row) else ""
 
     sections = {name: [] for name in STATUS_SECTIONS}
-    other = []
+    other, rejected = [], []
     for row in data:
+        if is_rejected_row(row):
+            rejected.append(row)
+            continue
         s = status_of(row)
         (sections[s] if s in sections else other).append(row)
     groups = [group for group in (sections[name] for name in STATUS_SECTIONS) if group]
     if other:
         groups.append(other)
+    if rejected:
+        groups.append(rejected)
     groups = [sorted(group, key=lambda row: not is_complete(row)) for group in groups]
 
     result = [header]
@@ -148,15 +171,6 @@ def _sheets_session_or_none():
     return _sheets_session
 
 
-def _drop_rejected(rows):
-    """Leave out leads rejected as the wrong business type (see app.py's delete_lead) -- they're
-    kept in the CSV so the scraper never re-adds them, but they have no reason to clutter the sheet."""
-    if len(rows) < 2 or "rejected_at" not in rows[0]:
-        return rows
-    idx = rows[0].index("rejected_at")
-    return [rows[0]] + [row for row in rows[1:] if not (idx < len(row) and row[idx].strip())]
-
-
 def push_sheets(local_path):
     """Overwrite the configured sheet's first tab with the current CSV content."""
     sheet_id = os.environ.get("GOOGLE_SHEET_ID")
@@ -167,7 +181,6 @@ def push_sheets(local_path):
         rows = list(csv.reader(f))
     if not rows:
         return
-    rows = _drop_rejected(rows)
     rows = _group_and_sort(rows)
     base = f"https://sheets.googleapis.com/v4/spreadsheets/{sheet_id}/values"
     try:
