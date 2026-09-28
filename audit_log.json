@@ -103,7 +103,8 @@
       "company": "At Your Disposal LLC",
       "verdict": "deleted",
       "reviewed_at": "2026-09-23",
-      "reason": "dumpster rental / junk removal"
+      "reason": "dumpster rental / junk removal",
+      "redeleted_at": "2026-09-28"
     },
     "(703) 807-1828": {
       "company": "Waste Knot Needlepoint",
@@ -152,7 +153,8 @@
       "company": "GFL Environmental",
       "verdict": "deleted",
       "reviewed_at": "2026-09-23",
-      "reason": "transfer station"
+      "reason": "transfer station",
+      "redeleted_at": "2026-09-28"
     },
     "(800) 989-2539": {
       "company": "Republic Services",
@@ -180,7 +182,8 @@
       "company": "Pro Waste Environmental Services",
       "verdict": "deleted",
       "reviewed_at": "2026-09-23",
-      "reason": "industrial/hazardous waste"
+      "reason": "industrial/hazardous waste",
+      "redeleted_at": "2026-09-28"
     },
     "(207) 487-5048": {
       "company": "Bolster's Rubbish & Recycling",
@@ -196,7 +199,8 @@
       "company": "Plummers Disposal Service",
       "verdict": "deleted",
       "reviewed_at": "2026-09-23",
-      "reason": "dumpster & porta-potty rental"
+      "reason": "dumpster & porta-potty rental",
+      "redeleted_at": "2026-09-28"
     },
     "(989) 370-3277": {
       "company": "Weaver's Disposal",
@@ -374,7 +378,8 @@
       "company": "WIN Waste New Lexington",
       "verdict": "deleted",
       "reviewed_at": "2026-09-23",
-      "reason": "landfill"
+      "reason": "landfill",
+      "redeleted_at": "2026-09-28"
     },
     "(330) 947-3465": {
       "company": "Conrad's Disposal",
@@ -420,7 +425,8 @@
       "company": "Republic Services Corvallis Recycle Depot",
       "verdict": "deleted",
       "reviewed_at": "2026-09-23",
-      "reason": "recycle depot"
+      "reason": "recycle depot",
+      "redeleted_at": "2026-09-28"
     },
     "(541) 988-3016": {
       "company": "McKenzie Disposal",
