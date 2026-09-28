@@ -87,6 +87,11 @@
   .backupWarn { background: color-mix(in srgb, var(--danger) 12%, var(--panel)); color: var(--danger);
                 border: 1px solid var(--danger); border-radius: 7px; padding: 8px 12px; margin-top: 10px; font-size: 13px; }
   .backupWarn[hidden] { display: none; }
+  .backupPaused { background: var(--row); color: var(--muted); border: 1px solid var(--line);
+                   border-radius: 7px; padding: 8px 12px; margin-top: 10px; font-size: 13px;
+                   display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+  .backupPaused[hidden] { display: none; }
+  .backupToggle { margin-top: 8px; font-size: 12px; }
   .removeBtn { padding: 4px 10px; font-size: 12px; }
   .note { color: var(--muted); font-size: 12px; margin-top: 12px; }
   .err { color: var(--danger); margin-top: 8px; min-height: 1em; }
@@ -104,6 +109,10 @@
   <div class="backupWarn" id="backupWarn" hidden>
     ⚠ Changes are saving on this server, but the backup to Google Sheets/GitHub is currently failing -- it'll keep retrying automatically. If the site restarts before it clears, the very latest edits could be lost.
   </div>
+  <div class="backupPaused" id="backupPausedNote" hidden>
+    <span>⏸ External backups (GitHub/Sheets) are paused -- nothing is being pushed. Changes still save on this server.</span>
+  </div>
+  <button type="button" class="link backupToggle" id="backupToggle"></button>
 </header>
 
 <main>
@@ -441,7 +450,11 @@ async function poll() {
   // A save always succeeds locally first -- this is just letting the owner know the external
   // backup (GitHub/Sheets) is currently failing, so a restart before it clears could lose the
   // very latest edits. It keeps retrying in the background on its own; no action is needed here.
-  $("backupWarn").hidden = !s.backupError;
+  // Suppressed while paused -- a paused backup "failing" to push isn't news, it's the point.
+  $("backupWarn").hidden = !s.backupError || s.backupsPaused;
+  $("backupPausedNote").hidden = !s.backupsPaused;
+  $("backupToggle").textContent = s.backupsPaused ? "Resume external backups" : "Pause external backups";
+  $("backupToggle").dataset.paused = s.backupsPaused ? "0" : "1";  // what clicking it should set next
   // Rebuilding the leads table wipes any text selection in it, which breaks copy/paste of a phone
   // number, note, etc. right in the middle of a scrape (when this refresh fires every 2s). Skip the
   // rebuild -- but keep updating progress above -- while the user has something selected; the next
@@ -517,6 +530,8 @@ $("run").onclick = async () => {
   catch (e) { $("err").textContent = e.message; }
 };
 $("stop").onclick = () => api("/api/stop", {}).then(poll);
+
+$("backupToggle").onclick = () => api("/api/backups", { paused: $("backupToggle").dataset.paused === "1" }).then(poll);
 
 $("retryFailed").onclick = async () => {
   $("err").textContent = "";

@@ -184,12 +184,38 @@ def is_empty(db_path):
         return conn.execute("SELECT 1 FROM leads LIMIT 1").fetchone() is None
 
 
+def _pause_flag_path(db_path):
+    return Path(db_path).with_name(Path(db_path).name + ".backups_paused")
+
+
+def backups_paused(db_path):
+    """Whether external (GitHub/Sheets) backup pushes are currently paused -- a plain flag file
+    next to the database, not an environment variable, so it can be toggled at runtime by anyone
+    with access to the page without restarting the service (an env var change on Render restarts
+    it). Checked by sync_backup() directly, so it applies the same way regardless of whether the
+    web app or the scraper subprocess is the one calling it."""
+    return _pause_flag_path(db_path).exists()
+
+
+def set_backups_paused(db_path, paused):
+    flag = _pause_flag_path(db_path)
+    if paused:
+        flag.parent.mkdir(parents=True, exist_ok=True)
+        flag.touch()
+    else:
+        flag.unlink(missing_ok=True)
+
+
 def sync_backup(db_path):
     """Export the database to its companion CSV and back that up -- sync_leads.py only ever speaks
     CSV, so this is the bridge that lets the (already-tested) GitHub/Sheets logic stay untouched.
-    Returns the failure message if the backup push failed just now, or None."""
+    The local CSV export always happens (it's just a local file, and keeps it current for whenever
+    backups resume); the actual external push is skipped while paused. Returns the failure message
+    if the push failed just now, or None (also the case while paused, since that isn't a failure)."""
     csv_path = Path(db_path).with_suffix(".csv")
     export_to_csv(db_path, csv_path)
+    if backups_paused(db_path):
+        return None
     return sync_leads.sync(csv_path)
 
 

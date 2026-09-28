@@ -182,6 +182,23 @@ class StatusEndpointTests(ServerTestCase):
         self.assertEqual(body["started"], False)
         self.assertEqual(body["failedStates"], [])
         self.assertEqual(body["notReachedStates"], [])
+        self.assertEqual(body["backupsPaused"], False)
+
+
+class BackupsPauseEndpointTests(ServerTestCase):
+    def tearDown(self):
+        db.set_backups_paused(self.db_path, False)
+
+    def test_pausing_and_resuming_is_reflected_in_status(self):
+        status, _ = self.post_json("/api/backups", {"paused": True})
+        self.assertEqual(status, 200)
+        _, body = self.get_json("/api/status")
+        self.assertTrue(body["backupsPaused"])
+
+        status, _ = self.post_json("/api/backups", {"paused": False})
+        self.assertEqual(status, 200)
+        _, body = self.get_json("/api/status")
+        self.assertFalse(body["backupsPaused"])
 
 
 class SecurityHeaderTests(ServerTestCase):

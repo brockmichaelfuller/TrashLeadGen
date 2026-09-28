@@ -56,7 +56,7 @@ Leads live in a SQLite database (`db.py`), with `phone` as the primary key -- th
 
 ## Output columns
 
-`company_name`, `phone` (format `(555) 123-4567`), `city`, `state`, `source` (the OSM object, e.g. `openstreetmap:node/123`), `date_collected`.
+`company_name`, `phone` (format `(555) 123-4567`), `email`, `website`, `address`, `city`, `state`, `timezone`, `source` (the OSM object, e.g. `openstreetmap:node/123`), `date_collected`, `status` and `notes` (set from the page once outreach begins — see below), `rejected_at` (set when a lead is removed as not a real hauler — see below).
 
 - **Deduped by phone number.** Rerunning only adds new phones (the database's primary key rejects a duplicate outright), so the script is safe to rerun or resume.
 - **Progress is saved after every state.** A failed state doesn't stop the run. Since most failures are brief Overpass hiccups, any state still failing after its normal retries gets one more automatic pass (after a short cooldown) before being reported — only a state that fails that too shows up as failed, with a Retry button on the page for whatever's left.
@@ -77,11 +77,21 @@ Render's free plan has no persistent disk: every redeploy, and every time the se
 
 Both can be set at once — on startup the app tries GitHub first and falls back to Sheets if GitHub has nothing (so either one alone is enough to survive a restart, into a brand new database). Neither is required for local use.
 
-A save from the web page (a status/notes edit or a delete/undo) writes to disk immediately and returns right away; the backup push happens a few seconds later in the background, so a burst of edits results in one push, not one per keystroke-save. If a push fails, it retries once automatically, and the page shows a banner for as long as the most recent attempt is still failing.
+A save from the web page (a status/notes edit or a delete/undo) writes to disk immediately and returns right away; the backup push happens a few seconds later in the background, so a burst of edits results in one push, not one per keystroke-save. If a push fails, it keeps retrying automatically every 30 seconds until one succeeds (or a new edit reschedules it sooner), and the page shows a banner for as long as the most recent attempt is still failing. A scrape backs up after every state regardless of whether the previous state's push succeeded, so a failure there self-corrects on the very next state.
+
+## Stopping things
+
+| What | How | How fast |
+|---|---|---|
+| A running scrape | Click **Stop** on the page, or `POST /api/stop` | Immediate — the scraper subprocess is killed outright |
+| External backups (GitHub/Sheets) | Click **Pause external backups** in the page header, or `POST /api/backups {"paused": true}` | Immediate, and doesn't restart the service (an environment variable change would). Local saves keep working; nothing pushes until you **Resume external backups** (or `{"paused": false}`) |
+| The whole app | Stop the process (Ctrl+C locally; suspend/delete the service on Render) | Immediate, but Render's free plan has no persistent disk — see below before relying on this |
+
+Anyone who can reach the page (i.e. anyone with the `APP_PASSWORD`, once one is set) can do any of these; there's no separate owner role.
 
 ## Recurring lead-quality audits
 
-`audit_log.json` tracks which leads have already been reviewed (by a person or by an AI session) for actually being a residential curbside hauler, so a recurring audit only looks at leads it hasn't seen before instead of starting over each time. It's read and written by whatever process runs that audit (a Claude Code session, following its own setup instructions) — the app itself never reads it. Commit it whenever an audit runs, regardless of which session ran it, so the history carries over.
+`audit_log.json` tracks which leads have already been reviewed (by a person or by an AI session) for actually being a residential curbside hauler, so a recurring audit only looks at leads it hasn't seen before instead of starting over each time. It's read and written by whatever process runs that audit (a Claude Code session, following its own setup instructions). The app itself also reads it, but only the `"deleted"` verdicts, and only to keep them rejected in the database (see `db.import_audit_log_rejections`, run at startup by both `app.py` and `lead_scraper.py`) — a lead the audit removed with older code, before permanent rejection existed, would otherwise come back as new on a later scrape. Commit `audit_log.json` whenever an audit runs, regardless of which session ran it, so the history carries over.
 
 ## Tests
 

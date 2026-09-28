@@ -385,7 +385,8 @@ class Handler(BaseHTTPRequestHandler):
                             "abortedEarly": None if running else run_aborted_early(job["log"]),
                             "finishedCount": len(finished),
                             "plannedCount": len(planned) if planned else None,
-                            "backupError": backup_state["error"]})
+                            "backupError": backup_state["error"],
+                            "backupsPaused": db.backups_paused(DB_PATH)})
         elif path == "/api/groups":
             self.send_json({"groups": GROUPS})
         elif path == "/api/export.csv":
@@ -413,6 +414,9 @@ class Handler(BaseHTTPRequestHandler):
                 if is_running():
                     job["proc"].terminate()
                     job["stopped"] = True
+            return self.send_json({"ok": True})
+        if path == "/api/backups":
+            db.set_backups_paused(DB_PATH, bool(data.get("paused")))
             return self.send_json({"ok": True})
         if path == "/api/lead":
             phone = (data.get("phone") or "").strip()

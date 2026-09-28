@@ -261,6 +261,47 @@ class IsEmptyTests(unittest.TestCase):
             self.assertFalse(db.is_empty(db_path))
 
 
+class BackupsPausedTests(unittest.TestCase):
+    def test_not_paused_by_default(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertFalse(db.backups_paused(Path(tmp) / "leads.db"))
+
+    def test_set_paused_then_unpaused(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "leads.db"
+            db.set_backups_paused(db_path, True)
+            self.assertTrue(db.backups_paused(db_path))
+            db.set_backups_paused(db_path, False)
+            self.assertFalse(db.backups_paused(db_path))
+
+    def test_unpausing_when_never_paused_does_not_raise(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db.set_backups_paused(Path(tmp) / "leads.db", False)  # must not raise
+
+    def test_sync_backup_skips_the_external_push_while_paused_but_still_exports_locally(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "leads.db"
+            db.insert_if_new(db_path, {"phone": "111", "company_name": "Acme"})
+            db.set_backups_paused(db_path, True)
+            with patch.object(db.sync_leads, "sync") as mock_sync:
+                result = db.sync_backup(db_path)
+            mock_sync.assert_not_called()
+            self.assertIsNone(result)
+            csv_path = db_path.with_suffix(".csv")
+            self.assertTrue(csv_path.exists())
+            self.assertIn("Acme", csv_path.read_text())
+
+    def test_sync_backup_pushes_normally_once_unpaused(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "leads.db"
+            db.insert_if_new(db_path, {"phone": "111"})
+            db.set_backups_paused(db_path, True)
+            db.set_backups_paused(db_path, False)
+            with patch.object(db.sync_leads, "sync", return_value=None) as mock_sync:
+                db.sync_backup(db_path)
+            mock_sync.assert_called_once()
+
+
 class ConcurrencyTests(unittest.TestCase):
     def test_concurrent_inserts_from_multiple_threads_never_duplicate_or_lose_a_phone(self):
         # This replaces the old fcntl-lock-based test: WAL mode + busy_timeout should make this safe
