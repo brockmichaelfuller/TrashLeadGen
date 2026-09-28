@@ -265,6 +265,35 @@ class RunResilienceTests(unittest.TestCase):
             rows = db.all_leads(db_path)
         self.assertEqual({r["company_name"] for r in rows}, {"Acme Waste", "Rocky Mountain Waste"})
 
+    def test_a_backup_failure_prints_a_marker_line_app_py_can_pick_up(self):
+        # app.py's pump_output() (reading this subprocess's output live) watches for exactly this
+        # "BACKUP_ERROR: "/"BACKUP_OK" line shape to drive the same banner an edit-triggered backup
+        # failure shows -- see PumpOutputTests in test_app.py.
+        elements = {"CO": [{"type": "node", "id": 1, "tags": {"name": "Acme Waste", "phone": "303-343-7096"}}]}
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "leads.db"
+            with patch("lead_scraper.fetch_elements", side_effect=lambda state: elements[state]), \
+                 patch.object(db.sync_leads, "restore"), \
+                 patch.object(db.sync_leads, "sync", return_value="GitHub push failed: HTTP 500"), \
+                 patch("lead_scraper.time.sleep"), \
+                 patch("builtins.print") as mock_print:
+                run(db_path, ["CO"])
+        printed = [c.args[0] for c in mock_print.call_args_list if c.args]
+        self.assertIn("BACKUP_ERROR: GitHub push failed: HTTP 500", printed)
+
+    def test_a_successful_backup_prints_an_ok_marker(self):
+        elements = {"CO": [{"type": "node", "id": 1, "tags": {"name": "Acme Waste", "phone": "303-343-7096"}}]}
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "leads.db"
+            with patch("lead_scraper.fetch_elements", side_effect=lambda state: elements[state]), \
+                 patch.object(db.sync_leads, "restore"), \
+                 patch.object(db.sync_leads, "sync", return_value=None), \
+                 patch("lead_scraper.time.sleep"), \
+                 patch("builtins.print") as mock_print:
+                run(db_path, ["CO"])
+        printed = [c.args[0] for c in mock_print.call_args_list if c.args]
+        self.assertIn("BACKUP_OK", printed)
+
     def test_a_state_that_fails_every_round_ends_up_in_the_final_failed_summary(self):
         with tempfile.TemporaryDirectory() as tmp:
             db_path = Path(tmp) / "leads.db"

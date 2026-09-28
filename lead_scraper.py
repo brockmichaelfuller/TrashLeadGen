@@ -374,7 +374,13 @@ def _attempt_state(state, db_path, seen, today):
             if keep and db.insert_if_new(db_path, row):
                 seen.add(row["phone"])
                 new += 1
-        db.sync_backup(db_path)  # and back it up, since a restart wipes the local disk
+        # Back it up, since a restart wipes the local disk. A failure here doesn't fail the state
+        # itself (the data is still safely on local disk either way) -- it's surfaced as its own
+        # BACKUP_ERROR/BACKUP_OK marker line instead, which app.py's pump_output() (reading this
+        # subprocess's output live) turns into the same banner an edit-triggered backup failure
+        # shows, rather than it only ever showing up as a raw line in the plain-language run log.
+        backup_error = db.sync_backup(db_path)
+        print(f"BACKUP_ERROR: {backup_error}" if backup_error else "BACKUP_OK")
         return new, None
     except Exception as error:  # one bad state must not stop the run
         return 0, error

@@ -138,9 +138,22 @@ def is_running():
 
 
 def pump_output(proc):
-    for line in proc.stdout:
+    for raw_line in proc.stdout:
+        line = raw_line.rstrip()
+        # A backup failure/success during a scrape (see lead_scraper._attempt_state) is routed
+        # through the same backup_state an edit-triggered backup uses, instead of only ever showing
+        # up as a raw "sync_leads: GitHub push failed: HTTP 409: {...}"-style line buried in the
+        # plain-language run log with no banner to show for it.
+        if line.startswith("BACKUP_ERROR: "):
+            with lock:
+                backup_state["error"] = line[len("BACKUP_ERROR: "):]
+            continue
+        if line == "BACKUP_OK":
+            with lock:
+                backup_state["error"] = None
+            continue
         with lock:
-            job["log"].append(line.rstrip())
+            job["log"].append(line)
             del job["log"][:-MAX_LOG_LINES]
     proc.wait()
 

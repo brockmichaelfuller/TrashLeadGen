@@ -1,6 +1,7 @@
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import app
@@ -173,6 +174,32 @@ class UpdateLeadTests(unittest.TestCase):
             db_path = Path(tmp) / "leads.db"
             db.insert_if_new(db_path, {"company_name": "A", "phone": "111"})
             self.assertFalse(update_lead(db_path, "999", {"status": "Interested"}))
+
+
+class PumpOutputTests(unittest.TestCase):
+    """A backup failure/success during a scrape (see lead_scraper._attempt_state's BACKUP_ERROR/
+    BACKUP_OK marker lines) must reach the same backup_state an edit-triggered backup uses, instead
+    of only ever showing up as a raw line in the plain-language run log with no banner for it."""
+
+    def setUp(self):
+        app.job["log"] = []
+
+    def tearDown(self):
+        app.backup_state["error"] = None
+        app.job["log"] = []
+
+    def test_a_backup_error_marker_sets_backup_state_and_is_not_logged(self):
+        proc = SimpleNamespace(stdout=["[1/1] CO: 0 new companies\n", "BACKUP_ERROR: GitHub push failed: HTTP 409\n"],
+                                wait=lambda: None)
+        app.pump_output(proc)
+        self.assertEqual(app.backup_state["error"], "GitHub push failed: HTTP 409")
+        self.assertEqual(app.job["log"], ["[1/1] CO: 0 new companies"])
+
+    def test_a_later_backup_ok_marker_clears_a_prior_error(self):
+        proc = SimpleNamespace(stdout=["BACKUP_ERROR: boom\n", "BACKUP_OK\n"], wait=lambda: None)
+        app.pump_output(proc)
+        self.assertIsNone(app.backup_state["error"])
+        self.assertEqual(app.job["log"], [])
 
 
 class BackupSchedulingTests(unittest.TestCase):
