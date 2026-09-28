@@ -371,6 +371,7 @@ def _attempt_state(state, db_path, seen, today):
 def run(db_path, states):
     db_path.parent.mkdir(parents=True, exist_ok=True)
     db.restore_if_empty(db_path)
+    db.import_audit_log_rejections(db_path)
     seen = db.existing_phones(db_path)
     today = date.today().isoformat()
     total_new = 0

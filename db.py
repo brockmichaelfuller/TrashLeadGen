@@ -11,10 +11,14 @@ import_from_csv are the bridge at that boundary, so the already-tested backup/re
 has to know the local store changed.
 """
 import csv
+import json
 import sqlite3
+from datetime import date
 from pathlib import Path
 
 import sync_leads
+
+AUDIT_LOG_PATH = Path(__file__).parent / "audit_log.json"
 
 COLUMNS = ["company_name", "phone", "email", "website", "address", "city", "state", "timezone",
            "source", "date_collected", "status", "notes", "rejected_at"]
@@ -100,6 +104,40 @@ def is_rejected(db_path, phone):
     with connect(db_path) as conn:
         row = conn.execute("SELECT rejected_at FROM leads WHERE phone = ?", (phone,)).fetchone()
         return bool(row and row["rejected_at"])
+
+
+def reject_phones(db_path, entries):
+    """Ensure every phone in `entries` (phone -> company_name) is rejected: inserts a placeholder
+    row with rejected_at set if the phone isn't known yet, or sets rejected_at on it if it exists
+    but isn't rejected yet. Never overwrites an already-set rejected_at. Used to import leads that
+    were rejected before permanent rejection existed (deleted outright by older code, so no
+    rejected_at was ever recorded for them) -- without this, a later scrape treats their phone as
+    new and adds them right back, silently undoing a decision that was already made."""
+    if not entries:
+        return
+    today = date.today().isoformat()
+    with connect(db_path) as conn:
+        for phone, company_name in entries.items():
+            conn.execute(
+                "INSERT INTO leads (phone, company_name, rejected_at) VALUES (?, ?, ?) "
+                "ON CONFLICT(phone) DO UPDATE SET rejected_at = excluded.rejected_at WHERE rejected_at = ''",
+                (phone, company_name, today))
+        conn.commit()
+
+
+def import_audit_log_rejections(db_path):
+    """audit_log.json's "deleted" verdicts predate permanent rejection (rejected_at) -- they were
+    removed outright by older code, so the database has no record they were ever reviewed and
+    rejected. Re-applying them here (cheap and idempotent -- see reject_phones) means a later
+    scrape can never re-add one as if it were new. Called on every startup by both app.py and
+    lead_scraper.py's own CLI entry point, so it applies regardless of which one runs first."""
+    try:
+        reviewed = json.loads(AUDIT_LOG_PATH.read_text()).get("reviewed", {})
+    except (OSError, ValueError):
+        return
+    deleted = {phone: entry.get("company", "") for phone, entry in reviewed.items()
+               if entry.get("verdict") == "deleted"}
+    reject_phones(db_path, deleted)
 
 
 def export_to_csv(db_path, csv_path):

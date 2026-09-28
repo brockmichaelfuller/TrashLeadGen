@@ -1,8 +1,10 @@
 import csv
+import json
 import tempfile
 import threading
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import db
 
@@ -102,6 +104,63 @@ class RejectionTests(unittest.TestCase):
             db.insert_if_new(db_path, {"phone": "111"})
             db.update_fields(db_path, "111", {"rejected_at": "2026-09-28"})
             self.assertIn("111", db.existing_phones(db_path))
+
+
+class RejectPhonesTests(unittest.TestCase):
+    def test_inserts_a_placeholder_row_rejected_for_an_unknown_phone(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "leads.db"
+            db.reject_phones(db_path, {"111": "Junk Removal Co"})
+            self.assertTrue(db.is_rejected(db_path, "111"))
+            lead = db.all_leads(db_path, include_rejected=True)[0]
+            self.assertEqual(lead["company_name"], "Junk Removal Co")
+
+    def test_rejects_a_phone_that_already_exists_as_an_active_lead(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "leads.db"
+            db.insert_if_new(db_path, {"phone": "111", "company_name": "Keep The Real Data"})
+            db.reject_phones(db_path, {"111": "Ignored -- row already exists"})
+            self.assertTrue(db.is_rejected(db_path, "111"))
+            lead = db.all_leads(db_path, include_rejected=True)[0]
+            self.assertEqual(lead["company_name"], "Keep The Real Data")  # existing data untouched
+
+    def test_never_overwrites_an_existing_rejected_at(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "leads.db"
+            db.insert_if_new(db_path, {"phone": "111"})
+            db.update_fields(db_path, "111", {"rejected_at": "2020-01-01"})
+            db.reject_phones(db_path, {"111": "whatever"})
+            lead = db.all_leads(db_path, include_rejected=True)[0]
+            self.assertEqual(lead["rejected_at"], "2020-01-01")
+
+    def test_does_not_reject_an_active_lead_absent_from_entries(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "leads.db"
+            db.insert_if_new(db_path, {"phone": "111", "company_name": "Untouched"})
+            db.reject_phones(db_path, {"222": "Some Other Co"})
+            self.assertFalse(db.is_rejected(db_path, "111"))
+
+
+class ImportAuditLogRejectionsTests(unittest.TestCase):
+    def test_rejects_every_deleted_verdict_and_skips_kept_ones(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "leads.db"
+            audit_path = Path(tmp) / "audit_log.json"
+            audit_path.write_text(json.dumps({"reviewed": {
+                "111": {"company": "Junk Removal Co", "verdict": "deleted"},
+                "222": {"company": "Real Hauler Inc", "verdict": "kept"},
+            }}))
+            with patch("db.AUDIT_LOG_PATH", audit_path):
+                db.import_audit_log_rejections(db_path)
+            self.assertTrue(db.is_rejected(db_path, "111"))
+            self.assertNotIn("222", db.existing_phones(db_path))  # "kept" leaves no trace here
+
+    def test_a_missing_audit_log_is_a_silent_no_op(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "leads.db"
+            with patch("db.AUDIT_LOG_PATH", Path(tmp) / "does-not-exist.json"):
+                db.import_audit_log_rejections(db_path)  # must not raise
+            self.assertEqual(db.existing_phones(db_path), set())
 
 
 class CsvBridgeTests(unittest.TestCase):

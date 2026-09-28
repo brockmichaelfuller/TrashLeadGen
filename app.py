@@ -423,6 +423,7 @@ def main():
     if host != "127.0.0.1" and not os.environ.get("APP_PASSWORD"):
         sys.exit("Refusing to listen on the network without APP_PASSWORD set.")
     db.restore_if_empty(DB_PATH)  # recover the last backup, since a fresh host starts with no database
+    db.import_audit_log_rejections(DB_PATH)
     server = ThreadingHTTPServer((host, args.port), Handler)
     print(f"TrashLeadGen UI: http://{host}:{args.port}  (Ctrl+C to stop)", flush=True)
     try:
