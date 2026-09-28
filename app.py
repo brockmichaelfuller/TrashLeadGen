@@ -1,4 +1,4 @@
-"""Web front end for the lead scrapers (overture_scraper.py or lead_scraper.py).
+"""Web front end for lead_scraper.py.
 
     python app.py            # then open http://127.0.0.1:8000
 
@@ -22,20 +22,17 @@ from urllib.parse import parse_qs
 
 ROOT = Path(__file__).parent
 sys.path.insert(0, str(ROOT))
-from lead_scraper import COLUMNS, STATE_GROUPS, STATES, dedupe_by_phone, ensure_columns, is_rejected, missing_fields  # noqa: E402
+from lead_scraper import COLUMNS, STATE_GROUPS, STATES, dedupe_by_phone, ensure_columns, is_rejected, locked, missing_fields  # noqa: E402
 from datetime import date  # noqa: E402
 import sync_leads  # noqa: E402
 LEADS_PATH = ROOT / "output" / "leads.csv"
 INDEX_PATH = ROOT / "static" / "index.html"
 MAX_LOG_LINES = 500
-# SCRAPER=osm uses the low-memory OpenStreetMap scraper (for small hosts like Render's free plan);
-# the default Overture scraper scans several GB and needs a few GB of RAM.
-USING_OSM = os.environ.get("SCRAPER", "overture").lower() == "osm"
-SCRAPER_SCRIPT = "lead_scraper.py" if USING_OSM else "overture_scraper.py"
-# Only the OSM scraper is split into state groups (it's the one that runs one slow request per
-# state and can outlast Render's free-plan idle window on a full nationwide run).
+SCRAPER_SCRIPT = "lead_scraper.py"
+# Split into state groups since a full nationwide run (one slow request per state) can outlast
+# Render's free-plan idle window.
 GROUPS = [{"id": str(i + 1), "label": f"{g[0]}–{g[-1]} ({len(g)} states)", "states": g}
-          for i, g in enumerate(STATE_GROUPS)] if USING_OSM else []
+          for i, g in enumerate(STATE_GROUPS)]
 
 lock = threading.Lock()
 job = {"proc": None, "log": [], "started": False, "scope": "", "states": None, "stopped": False}
@@ -60,18 +57,21 @@ def update_lead(path, phone, updates):
     """Set status/notes on the row with this phone number. Returns False if the phone isn't found."""
     if not path.exists():
         return False
-    with path.open(newline="", encoding="utf-8") as f:
-        reader = csv.DictReader(f)
-        fieldnames = reader.fieldnames
-        rows = list(reader)
-    row = next((r for r in rows if r.get("phone") == phone), None)
-    if row is None:
-        return False
-    row.update(updates)
-    with path.open("w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
-        writer.writeheader()
-        writer.writerows(rows)
+    # Locked so the scraper subprocess can't append a row between this read and this write -- that
+    # window is exactly what used to make a freshly-scraped lead vanish under a concurrent edit.
+    with locked(path):
+        with path.open(newline="", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            fieldnames = reader.fieldnames
+            rows = list(reader)
+        row = next((r for r in rows if r.get("phone") == phone), None)
+        if row is None:
+            return False
+        row.update(updates)
+        with path.open("w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(rows)
     return True
 
 
@@ -83,20 +83,21 @@ def delete_lead(path, phone):
     phone isn't found."""
     if not path.exists():
         return False
-    with path.open(newline="", encoding="utf-8") as f:
-        reader = csv.DictReader(f)
-        fieldnames = reader.fieldnames
-        rows = list(reader)
-    row = next((r for r in rows if r.get("phone") == phone), None)
-    if row is None:
-        return False
-    row["rejected_at"] = date.today().isoformat()
-    if "rejected_at" not in fieldnames:  # older CSV, in case this runs before ensure_columns does
-        fieldnames = list(fieldnames) + ["rejected_at"]
-    with path.open("w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
-        writer.writeheader()
-        writer.writerows(rows)
+    with locked(path):
+        with path.open(newline="", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            fieldnames = reader.fieldnames
+            rows = list(reader)
+        row = next((r for r in rows if r.get("phone") == phone), None)
+        if row is None:
+            return False
+        row["rejected_at"] = date.today().isoformat()
+        if "rejected_at" not in fieldnames:  # older CSV, in case this runs before ensure_columns does
+            fieldnames = list(fieldnames) + ["rejected_at"]
+        with path.open("w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(rows)
     return True
 
 
@@ -179,17 +180,15 @@ def user_facing_log(log_lines):
 
 def start_run(group_id="all", explicit_states=None):
     """One scrape: the whole U.S., one ~13-state group, or (for the "retry failed" button) an
-    explicit list of state codes. Groups and explicit states are OSM-only; Overture is one query."""
+    explicit list of state codes."""
     if explicit_states:
-        if not USING_OSM:
-            return "Retrying specific states isn't supported by this scraper."
         states, label = [s.upper() for s in explicit_states], f"retry: {', '.join(explicit_states)}"
     else:
         group = next((g for g in GROUPS if g["id"] == group_id), None)
         if group_id and group_id != "all" and not group:
             return "Unknown group."
         states, label = (group["states"], group["label"]) if group else (None, "the entire U.S.")
-    if states is None and USING_OSM:
+    if states is None:
         # Materialize the real planned list (instead of letting the scraper fall back to its own
         # default) so progress/stop reporting always has something concrete to compare against.
         states = list(STATES)

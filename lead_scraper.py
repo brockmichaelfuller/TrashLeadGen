@@ -6,7 +6,9 @@ split into 50 states + DC internally. Businesses that publish a phone number are
 to a single CSV, deduped by phone number.
 """
 import argparse
+import contextlib
 import csv
+import fcntl
 import re
 import sys
 import time
@@ -268,6 +270,25 @@ def fetch_elements(state_code):
     raise RuntimeError(f"Overpass failed after {MAX_ATTEMPTS} attempts:\n" + "\n".join(errors))
 
 
+@contextlib.contextmanager
+def locked(path):
+    """Exclusive advisory lock on `path`, held for the duration of the block. Serializes writes
+    between whichever processes touch the CSV -- this scraper subprocess appending rows and the web
+    app's read-modify-write per edit -- so one can never silently erase a row the other just wrote.
+    (Reproduced live: an edit that read the file the instant before the scraper's append landed,
+    then wrote back its own now-stale snapshot, wiping that new row out from under it.) Uses a
+    separate ".lock" file rather than locking the CSV itself, so this never risks truncating or
+    otherwise disturbing the data file regardless of which process gets here first."""
+    lock_path = path.with_name(path.name + ".lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a") as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(f, fcntl.LOCK_UN)
+
+
 def load_existing_phones(path):
     """Phones already saved in the CSV, normalized so old rows in other formats still match."""
     if not path.exists():
@@ -280,15 +301,16 @@ def ensure_columns(path):
     """Upgrade an older CSV in place so its header matches COLUMNS (missing fields left blank)."""
     if not path.exists() or path.stat().st_size == 0:
         return
-    with path.open(newline="", encoding="utf-8") as f:
-        reader = csv.DictReader(f)
-        if reader.fieldnames == COLUMNS:
-            return
-        rows = list(reader)
-    with path.open("w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=COLUMNS, extrasaction="ignore", restval="")
-        writer.writeheader()
-        writer.writerows(rows)
+    with locked(path):
+        with path.open(newline="", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            if reader.fieldnames == COLUMNS:
+                return
+            rows = list(reader)
+        with path.open("w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=COLUMNS, extrasaction="ignore", restval="")
+            writer.writeheader()
+            writer.writerows(rows)
 
 
 def dedupe_by_phone(path):
@@ -299,23 +321,24 @@ def dedupe_by_phone(path):
     anything changed."""
     if not path.exists():
         return False
-    with path.open(newline="", encoding="utf-8") as f:
-        reader = csv.DictReader(f)
-        fieldnames = reader.fieldnames
-        rows = list(reader)
-    seen_phones, deduped = set(), []
-    for row in rows:
-        phone = row.get("phone")
-        if phone in seen_phones:
-            continue
-        seen_phones.add(phone)
-        deduped.append(row)
-    if len(deduped) == len(rows):
-        return False
-    with path.open("w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
-        writer.writeheader()
-        writer.writerows(deduped)
+    with locked(path):
+        with path.open(newline="", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            fieldnames = reader.fieldnames
+            rows = list(reader)
+        seen_phones, deduped = set(), []
+        for row in rows:
+            phone = row.get("phone")
+            if phone in seen_phones:
+                continue
+            seen_phones.add(phone)
+            deduped.append(row)
+        if len(deduped) == len(rows):
+            return False
+        with path.open("w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(deduped)
     return True
 
 
@@ -366,9 +389,12 @@ def _attempt_state(state, writer, out, output_path, seen, today):
             row = element_to_row(element, state, today)
             if row and row["phone"] not in seen and website_offers_residential_pickup(row["website"]):
                 seen.add(row["phone"])
-                writer.writerow(row)
+                # Locked so a web-app edit's read-modify-write can never land between this write and
+                # its flush and then overwrite this row with a stale, pre-write snapshot of the file.
+                with locked(output_path):
+                    writer.writerow(row)
+                    out.flush()  # keep progress if the run is interrupted later
                 new += 1
-        out.flush()  # keep progress if the run is interrupted later
         sync_leads.sync(output_path)  # and back it up, since a restart wipes the local disk
         return new, None
     except Exception as error:  # one bad state must not stop the run

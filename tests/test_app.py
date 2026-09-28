@@ -1,10 +1,12 @@
 import csv
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 
-from app import delete_lead, parse_failed_states, parse_finished_states, read_csv, user_facing_log
-from lead_scraper import load_existing_phones, normalize_phone
+from app import delete_lead, parse_failed_states, parse_finished_states, read_csv, update_lead, user_facing_log
+from lead_scraper import load_existing_phones, locked, normalize_phone
 
 
 class ParseFailedStatesTests(unittest.TestCase):
@@ -137,6 +139,90 @@ class DeleteLeadTests(unittest.TestCase):
     def test_returns_false_when_the_file_does_not_exist(self):
         with tempfile.TemporaryDirectory() as tmp:
             self.assertFalse(delete_lead(Path(tmp) / "missing.csv", "111"))
+
+
+class UpdateLeadTests(unittest.TestCase):
+    def test_sets_only_the_given_fields_on_the_matching_row(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "leads.csv"
+            with path.open("w", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=["company_name", "phone", "status", "notes"])
+                writer.writeheader()
+                writer.writerow({"company_name": "A", "phone": "111", "status": "", "notes": ""})
+            self.assertTrue(update_lead(path, "111", {"status": "Interested"}))
+            with path.open() as f:
+                row = next(csv.DictReader(f))
+        self.assertEqual(row["status"], "Interested")
+        self.assertEqual(row["notes"], "")
+
+    def test_returns_false_for_an_unknown_phone(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "leads.csv"
+            with path.open("w", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=["company_name", "phone"])
+                writer.writeheader()
+                writer.writerow({"company_name": "A", "phone": "111"})
+            self.assertFalse(update_lead(path, "999", {"status": "Interested"}))
+
+
+class ConcurrentWriteTests(unittest.TestCase):
+    """Regression tests for the race the review reproduced live: the scraper subprocess appends a
+    row between the web app's read and its rewrite of the whole file, and the app's write -- based
+    on a now-stale snapshot -- silently erases the row the scraper just added. update_lead/
+    delete_lead and the scraper's per-row write now share one lock (lead_scraper.locked) around
+    exactly that window, so whichever one gets there first, the other must wait its turn rather
+    than working from a stale read."""
+
+    def test_a_concurrent_append_is_not_erased_by_an_interleaved_edit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "leads.csv"
+            with path.open("w", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=["company_name", "phone", "status"])
+                writer.writeheader()
+                writer.writerow({"company_name": "Existing Co", "phone": "111", "status": ""})
+
+            holding_lock = threading.Event()
+
+            def scraper_append():
+                with locked(path):
+                    holding_lock.set()
+                    time.sleep(0.1)  # long enough that update_lead below must wait, not race
+                    with path.open("a", newline="") as f:
+                        csv.DictWriter(f, fieldnames=["company_name", "phone", "status"]).writerow(
+                            {"company_name": "Freshly Scraped Co", "phone": "222", "status": ""})
+
+            t = threading.Thread(target=scraper_append)
+            t.start()
+            holding_lock.wait(timeout=2)
+            self.assertTrue(update_lead(path, "111", {"status": "Interested"}))
+            t.join(timeout=2)
+
+            with path.open() as f:
+                rows = list(csv.DictReader(f))
+        self.assertEqual({r["phone"] for r in rows}, {"111", "222"})
+        self.assertEqual(next(r for r in rows if r["phone"] == "111")["status"], "Interested")
+
+    def test_locked_is_mutually_exclusive_across_threads(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "leads.csv"
+            order = []
+
+            def hold_and_record(label, hold_seconds):
+                with locked(path):
+                    order.append(f"{label}-start")
+                    time.sleep(hold_seconds)
+                    order.append(f"{label}-end")
+
+            t1 = threading.Thread(target=hold_and_record, args=("first", 0.1))
+            t1.start()
+            time.sleep(0.02)  # ensure t1 grabs the lock first
+            t2 = threading.Thread(target=hold_and_record, args=("second", 0))
+            t2.start()
+            t1.join(timeout=2)
+            t2.join(timeout=2)
+        # If the lock weren't exclusive, "second-start" could land between "first-start" and
+        # "first-end". It must not: first has to fully finish before second ever starts.
+        self.assertEqual(order, ["first-start", "first-end", "second-start", "second-end"])
 
 
 if __name__ == "__main__":
