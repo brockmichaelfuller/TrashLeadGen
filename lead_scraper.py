@@ -318,10 +318,15 @@ def log_debug_detail(output_path, state, error):
 
 # A state that still fails after MAX_ATTEMPTS mirror cycles usually isn't broken -- Overpass is a
 # free, best-effort public service and individual mirrors have brief outages/rate limits that
-# typically clear within a minute or two. Automatically give the whole batch of failures one more
-# pass after a cooldown, instead of leaving that to a person clicking Retry every time.
-RETRY_ROUNDS = 2  # the initial pass, plus this many additional automatic passes over failures
-RETRY_ROUND_DELAY_SECONDS = 30
+# typically clear within a minute or two. Automatically give the whole batch of failures more
+# passes after a cooldown, instead of leaving that to a person clicking Retry every time.
+#
+# Hit live: a 51-state run caught overpass-api.de refusing every connection, kumi.systems returning
+# 504s, and the .fr mirror throwing its own server-side data error, all three at once, for a stretch
+# of over 30 minutes -- a single 30s cooldown and one extra pass wasn't enough for 4 of 51 states to
+# land in a good window. Longer cooldown, one more pass.
+RETRY_ROUNDS = 3  # total passes over a state before giving up on it, including the initial one
+RETRY_ROUND_DELAY_SECONDS = 90
 
 # This many states in a row failing to even connect (not just slow/busy/blocked) means the data
 # source is unreachable from here entirely, not just having a rough moment -- see its use in run().
