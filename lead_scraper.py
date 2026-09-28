@@ -74,7 +74,7 @@ EXCLUDE_NAME = re.compile(
     r"e-?waste|electronic|shred|portable|porta[- ]?(potty|john)|toilet|restroom|cleaning|janitor|"
     r"\b(city|town|village|county|township|state) of\b|\b(department|dept|division|bureau|commission|agency|"
     r"authority|public works|municipal|school|hospital|clinic|dental|veterinary)\b|\bfacility\b|"
-    r"drop[- ]?off|collection center|convenience center|"
+    r"drop[- ]?off|collection center|convenience center|disposal area|"
     r"dumpster|roll[- ]?off|\bjunk\b|\bbulk\b|construction|demolition|debris|industrial|"
     r"campus|sustainability|headquarters|corporate office|\bstore\b|\bshop\b|\bmarket\b|"
     r"treasures|antique|consignment|thrift|vintage|furnishings|clothing|apparel|needlepoint|\bzero waste\b|"
@@ -183,7 +183,10 @@ def element_to_row(element, state, today):
     if not name or not is_named_match or EXCLUDE_NAME.search(name) or tags.get("man_made") in EXCLUDE_MAN_MADE:
         return None
     website = (tags.get("website") or tags.get("contact:website") or "").strip()
-    if re.search(r"\.gov(/|$)", website, re.I):  # a government site regardless of what the name says
+    # A government site regardless of what the name says: .gov, or a state-locality .us domain
+    # (town.dennis.ma.us, ci.x.ca.us) -- that namespace is reserved for governments, schools and
+    # libraries, and plenty of towns still use it instead of .gov.
+    if re.search(r"\.(gov|[a-z]{2}\.us)(/|:|$)", website, re.I):
         return None
     phone = next((normalize_phone(tags[k]) for k in PHONE_KEYS if k in tags), None)
     if not phone:

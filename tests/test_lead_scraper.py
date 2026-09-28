@@ -177,6 +177,18 @@ class MoreTests(unittest.TestCase):
         tags = {"name": "Acme Waste Services", "phone": "303-343-7096", "website": "https://acmewaste.com"}
         self.assertIsNotNone(element_to_row({"type": "node", "id": 1, "tags": tags}, "CO", "x"))
 
+    def test_a_state_locality_dot_us_website_is_excluded_like_dot_gov(self):
+        # Caught live in the audit: "Dennis Town Disposal Area" (town.dennis.ma.us), a town-run
+        # facility on the .us locality namespace many towns use instead of .gov. A company's own
+        # plain .us domain is still fine.
+        for website in ("https://www.town.dennis.ma.us/343/Solid-Waste-Recycling-Division", "http://ci.fresno.ca.us"):
+            tags = {"name": "Acme Waste Collection", "phone": "303-343-7096", "website": website}
+            self.assertIsNone(element_to_row({"type": "node", "id": 1, "tags": tags}, "CO", "x"), website)
+        tags = {"name": "Dennis Town Disposal Area", "phone": "303-343-7096"}
+        self.assertIsNone(element_to_row({"type": "node", "id": 1, "tags": tags}, "CO", "x"))
+        tags = {"name": "Acme Waste Services", "phone": "303-343-7096", "website": "https://acmewaste.us"}
+        self.assertIsNotNone(element_to_row({"type": "node", "id": 1, "tags": tags}, "CO", "x"))
+
 
 class RequiredFieldsTests(unittest.TestCase):
     def test_lead_needs_name_phone_email_and_timezone(self):
