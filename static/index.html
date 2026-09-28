@@ -35,8 +35,10 @@
   /* A plain link styled to match its sibling buttons -- avoids nesting a <button> inside an <a>,
      which is invalid HTML and gets keyboard-focused twice. */
   a.btn-link { display: inline-flex; align-items: center; justify-content: center; text-decoration: none;
-               border: 1px solid var(--line); background: var(--panel); border-radius: 7px; padding: 7px 12px; cursor: pointer; }
+               color: var(--text); border: 1px solid var(--line); background: var(--panel); border-radius: 7px;
+               padding: 7px 12px; cursor: pointer; }
   a.btn-link:hover { background: var(--row); }
+  a.btn-link:visited { color: var(--text); }
   input, select { border: 1px solid var(--line); background: var(--bg); border-radius: 7px; padding: 7px 10px; width: 100%; }
   .row { display: flex; gap: 8px; align-items: center; }
   .row > * { flex: 1; }
@@ -56,12 +58,10 @@
   .stats { display: flex; gap: 24px; margin-bottom: 12px; }
   .stat b { display: block; font-size: 22px; }
   .stat span { color: var(--muted); font-size: 12px; }
-  .tools { display: grid; grid-template-columns: 1fr 130px auto auto auto; gap: 8px; margin-bottom: 12px; }
+  .tools { display: grid; grid-template-columns: 1fr 130px auto auto auto auto; gap: 8px; align-items: center; margin-bottom: 12px; }
   @media (max-width: 560px) { .tools { grid-template-columns: 1fr 1fr; } }
   .scroll { overflow-x: auto; }
-  .tabs { display: flex; gap: 8px; margin-bottom: 14px; }
-  .tab { padding: 7px 14px; }
-  .tab.active { background: var(--text); color: var(--panel); border-color: var(--text); }
+  .emailFilter { display: flex; align-items: center; gap: 6px; white-space: nowrap; }
   tr.new td { animation: flash 2s ease-out; }
   @keyframes flash { from { background: rgba(31, 138, 91, .28); } to { background: transparent; } }
   table { width: 100%; border-collapse: collapse; }
@@ -112,9 +112,10 @@
       <h2>Scrape</h2>
       <div class="sub">Searches the United States for residential trash-pickup companies.</div>
       <label class="sr-only" for="scope">Area to search</label>
-      <select id="scope" hidden style="margin-top:10px">
-        <option value="all">Entire U.S. (slower — can take a few hours; safe to leave running)</option>
+      <select id="scope" hidden style="margin-top:10px" title="Runs all 50 states + DC in one go. Slower -- can take a few hours -- but safe to leave running.">
+        <option value="all">Entire U.S. (slower, few hours)</option>
       </select>
+      <div class="sub" id="scopeHint" hidden style="margin-top:4px">Hover an option to see which states it covers.</div>
       <div class="row" style="margin-top:12px">
         <button class="primary" id="run">Run scrape</button>
         <button class="danger" id="stop" hidden>Stop</button>
@@ -133,17 +134,13 @@
   </div>
 
   <section class="card">
-    <h2>Leads</h2>
-    <div class="tabs">
-      <button class="tab active" id="tabPartial">Partial (missing something) <b id="cntPartial">0</b></button>
-      <button class="tab" id="tabComplete">Complete (name, phone, email, timezone) <b id="cntComplete">0</b></button>
-    </div>
+    <h2>Leads ready to call</h2>
     <div class="undoBar" id="undoBar" hidden>
       <span id="undoText"></span>
       <button type="button" class="link" id="undoBtn">Undo</button>
     </div>
     <div class="stats">
-      <div class="stat"><b id="statTotal">0</b><span>in this tab</span></div>
+      <div class="stat"><b id="statTotal">0</b><span>total</span></div>
       <div class="stat"><b id="statEmails">0</b><span>with email</span></div>
       <div class="stat"><b id="statStates">0</b><span>states</span></div>
       <div class="stat"><b id="statShown">0</b><span>shown</span></div>
@@ -153,9 +150,10 @@
       <input id="search" type="search" placeholder="Search name, phone, email, city…">
       <label class="sr-only" for="stateFilter">Filter by state</label>
       <select id="stateFilter"><option value="">All states</option></select>
+      <label class="emailFilter"><input type="checkbox" id="emailFilter">Has email</label>
       <button id="copy">Copy phones</button>
       <button id="copyEmails">Copy emails</button>
-      <a id="download" class="btn-link" href="/api/export.csv?set=partial" download>Download CSV</a>
+      <a id="download" class="btn-link" href="/api/export.csv" download>Download CSV</a>
     </div>
     <div class="scroll">
       <table>
@@ -164,7 +162,7 @@
           <th data-k="city">City</th><th data-k="state">State</th><th data-k="timezone">Timezone</th>
           <th data-k="status">Interested?</th><th>Notes</th>
           <th data-k="email">Email</th><th data-k="website">Website</th><th data-k="address">Address</th>
-          <th data-k="date_collected">Collected</th><th data-k="missing" id="missingTh" hidden>Missing</th>
+          <th data-k="date_collected">Collected</th><th data-k="missing">Missing</th>
           <th data-k="source">Source</th><th>Remove</th>
         </tr></thead>
         <tbody id="rows"></tbody>
@@ -178,7 +176,7 @@
 
 <script>
 const $ = id => document.getElementById(id);
-let tab = "partial", leads = [], sort = { k: null, dir: 1 }, wasRunning = false, seenSources = null;
+let leads = [], sort = { k: null, dir: 1 }, wasRunning = false, seenSources = null;
 
 const api = (url, body) => fetch(url, body === undefined ? {} : {
   method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body)
@@ -307,9 +305,8 @@ function renderLeads() {
     if (tr) refocus = { phone: tr.dataset.phone, start: active.selectionStart, end: active.selectionEnd };
   }
 
-  const q = $("search").value.trim().toLowerCase(), st = $("stateFilter").value;
-  const inTab = leads.filter(l => (tab === "complete") === l.complete);
-  const shown = inTab.filter(l => (!st || l.state === st) &&
+  const q = $("search").value.trim().toLowerCase(), st = $("stateFilter").value, emailOnly = $("emailFilter").checked;
+  const shown = leads.filter(l => (!st || l.state === st) && (!emailOnly || l.email) &&
     (!q || [l.company_name, l.phone, l.email, l.address, l.city, l.state].some(v => (v || "").toLowerCase().includes(q))));
   // Until a column header is clicked, show newest first so leads appear at the top as they are found.
   if (sort.k) shown.sort((a, b) => (a[sort.k] || "").localeCompare(b[sort.k] || "") * sort.dir);
@@ -335,7 +332,7 @@ function renderLeads() {
       tr.append(td);
     }
     tr.append(statusCell(l), notesCell(l));
-    for (const k of ["email", "website", "address", "date_collected", ...(tab === "partial" ? ["missing"] : [])]) {
+    for (const k of ["email", "website", "address", "date_collected", "missing"]) {
       const td = document.createElement("td");
       td.textContent = l[k] || "";
       tr.append(td);
@@ -353,24 +350,13 @@ function renderLeads() {
     const inp = tr && tr.querySelector(".notes-input");
     if (inp) { inp.focus(); inp.setSelectionRange(refocus.start, refocus.end); }
   }
-  $("cntComplete").textContent = leads.filter(l => l.complete).length;
-  $("cntPartial").textContent = leads.filter(l => !l.complete).length;
-  $("tabComplete").classList.toggle("active", tab === "complete");
-  $("tabPartial").classList.toggle("active", tab === "partial");
-  $("missingTh").hidden = tab !== "partial";
-  $("download").href = `/api/export.csv?set=${tab}`;
-  $("statTotal").textContent = inTab.length;
-  $("statEmails").textContent = inTab.filter(l => l.email).length;
-  $("statStates").textContent = new Set(inTab.map(l => l.state).filter(Boolean)).size;
+  $("statTotal").textContent = leads.length;
+  $("statEmails").textContent = leads.filter(l => l.email).length;
+  $("statStates").textContent = new Set(leads.map(l => l.state).filter(Boolean)).size;
   $("statShown").textContent = shown.length;
-  $("empty").hidden = inTab.length > 0;
-  if (inTab.length === 0) {
-    const otherCount = tab === "complete" ? leads.filter(l => !l.complete).length : leads.filter(l => l.complete).length;
-    if (!leads.length) $("empty").textContent = "No leads yet. Click Run scrape to collect them.";
-    else if (tab === "complete") $("empty").textContent = `No leads with email yet. ${otherCount} lead${otherCount === 1 ? "" : "s"} without email ${otherCount === 1 ? "is" : "are"} in the other tab.`;
-    else $("empty").textContent = `No partial leads. ${otherCount} complete lead${otherCount === 1 ? "" : "s"} ${otherCount === 1 ? "is" : "are"} in the other tab.`;
-  }
-  const states = [...new Set(inTab.map(l => l.state).filter(Boolean))].sort();
+  $("empty").hidden = leads.length > 0;
+  if (!leads.length) $("empty").textContent = "No leads yet. Click Run scrape to collect them.";
+  const states = [...new Set(leads.map(l => l.state).filter(Boolean))].sort();
   const cur = $("stateFilter").value;
   $("stateFilter").replaceChildren(new Option("All states", ""), ...states.map(s => new Option(s, s)));
   $("stateFilter").value = states.includes(cur) ? cur : "";
@@ -381,9 +367,14 @@ async function loadLeads() { leads = await api("/api/leads"); renderLeads(); }
 
 async function loadGroups() {
   const { groups } = await api("/api/groups");
-  if (!groups.length) return; // Overture scraper: one query covers the whole country, no groups
+  if (!groups.length) return; // no groups configured -- leave the single "Entire U.S." option as-is
   $("scope").hidden = false;
-  for (const g of groups) $("scope").append(new Option(`Group ${g.id}: ${g.label}`, g.id));
+  $("scopeHint").hidden = false;
+  for (const g of groups) {
+    const opt = new Option(`Group ${g.id}: ${g.label}`, g.id);
+    opt.title = g.states.join(", ");  // the option text alone (e.g. "AL–ID") only gives the range
+    $("scope").append(opt);
+  }
 }
 
 // How far through the current run we are, from the scraper's own "[3/13] CO: ..." progress lines
@@ -470,9 +461,7 @@ async function copyText(text) {
   return false;
 }
 
-$("search").oninput = $("stateFilter").onchange = renderLeads;
-$("tabComplete").onclick = () => { tab = "complete"; renderLeads(); };
-$("tabPartial").onclick = () => { tab = "partial"; renderLeads(); };
+$("search").oninput = $("stateFilter").onchange = $("emailFilter").onchange = renderLeads;
 
 // Sortable headers: keyboard-operable (not just clickable), with aria-sort and a visible arrow on
 // whichever column is active, so the current sort is announced to screen readers and visible to

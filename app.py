@@ -20,7 +20,7 @@ import time
 from datetime import date
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import urlparse
 
 ROOT = Path(__file__).parent
 sys.path.insert(0, str(ROOT))
@@ -118,14 +118,16 @@ DO_NOT_EXPORT_STATUSES = {"Not interested", "Do not contact"}
 VALID_STATUSES = set(sync_leads.STATUS_SECTIONS)
 
 
-def export_csv(db_path, which="all"):
+def export_csv(db_path):
+    """Every non-rejected lead ready to call (has a name and phone), except one marked "Not
+    interested" or "Do not contact" -- the same set the page's Copy buttons use. There's no
+    complete/partial split: a lead missing an email is still callable, so leaving it out of the
+    default export silently dropped otherwise-good leads from outreach."""
     out = io.StringIO()
     writer = csv.DictWriter(out, fieldnames=db.COLUMNS, extrasaction="ignore", restval="")
     writer.writeheader()
     for row in read_leads(db_path):
-        if row.get("status") in DO_NOT_EXPORT_STATUSES:
-            continue
-        if which == "all" or (which == "complete") == row["complete"]:
+        if row.get("status") not in DO_NOT_EXPORT_STATUSES:
             writer.writerow(row)
     return out.getvalue().encode()
 
@@ -328,7 +330,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         if not self.require_auth():
             return
-        path, _, query = self.path.partition("?")
+        path = self.path.split("?")[0]
         if path == "/":
             self.send_body(INDEX_PATH.read_bytes(), "text/html; charset=utf-8")
         elif path == "/api/leads":
@@ -354,9 +356,8 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/api/groups":
             self.send_json({"groups": GROUPS})
         elif path == "/api/export.csv":
-            which = {"complete": "complete", "partial": "partial"}.get(parse_qs(query).get("set", [""])[0], "all")
-            self.send_body(export_csv(DB_PATH, which), "text/csv",
-                           extra={"Content-Disposition": f'attachment; filename="leads-{which}.csv"'})
+            self.send_body(export_csv(DB_PATH), "text/csv",
+                           extra={"Content-Disposition": 'attachment; filename="leads.csv"'})
         elif path == "/api/debug.log":
             debug_path = DB_PATH.parent / "debug.log"
             body = debug_path.read_bytes() if debug_path.exists() else b"(empty)"

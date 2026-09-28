@@ -157,6 +157,15 @@ class ExportEndpointTests(ServerTestCase):
         rows = list(csv.DictReader(data.decode().splitlines()))
         self.assertEqual({r["phone"] for r in rows}, {"111"})
 
+    def test_export_includes_a_lead_missing_email(self):
+        # There is no complete/partial split any more -- a lead with a name and phone but no email
+        # is still callable, and used to be silently left out of the default export because it only
+        # covered the "complete" tab's leads.
+        status, data = self.request("GET", "/api/export.csv")
+        rows = {r["phone"]: r for r in csv.DictReader(data.decode().splitlines())}
+        self.assertIn("111", rows)
+        self.assertEqual(rows["111"]["email"], "")
+
 
 class RunEndpointTests(ServerTestCase):
     def test_unknown_group_is_rejected_without_starting_anything(self):
