@@ -122,7 +122,7 @@ class SheetsEnabledTests(unittest.TestCase):
 
     @patch.dict("os.environ", {"GOOGLE_SHEET_ID": "sheet123", "GOOGLE_SERVICE_ACCOUNT_JSON": "x"}, clear=True)
     @patch("sync_leads._sheets_session_or_none")
-    def test_push_sends_parsed_csv_rows_and_clears_first(self, mock_session_fn):
+    def test_push_sends_parsed_csv_rows_and_clears_the_tail_after(self, mock_session_fn):
         mock_session = MagicMock()
         mock_session.put.return_value = MagicMock(status_code=200)
         mock_session_fn.return_value = mock_session
@@ -134,12 +134,52 @@ class SheetsEnabledTests(unittest.TestCase):
                 writer.writerow(["Acme Waste", "(555) 123-4567"])
             sync_leads.push_sheets(path)
         mock_session.post.assert_called_once()
-        # Must clear a wide range, not just cell A1 -- clearing only A1 previously left stale rows
-        # behind whenever a push had fewer rows than the sheet's previous content (e.g. after a
-        # deletion), so the sheet kept accumulating leftovers instead of ever actually shrinking.
-        self.assertIn("A1:Z100000:clear", mock_session.post.call_args.args[0])
+        # Clears everything past the 2 rows just written, not just cell A1 -- clearing only A1
+        # previously left stale rows behind whenever a push had fewer rows than the sheet's
+        # previous content (e.g. after a deletion), so the sheet kept accumulating leftovers.
+        self.assertIn("A3:Z100000:clear", mock_session.post.call_args.args[0])
         sent_values = mock_session.put.call_args.kwargs["json"]["values"]
         self.assertEqual(sent_values, [["company_name", "phone"], ["Acme Waste", "(555) 123-4567"]])
+
+    @patch.dict("os.environ", {"GOOGLE_SHEET_ID": "sheet123", "GOOGLE_SERVICE_ACCOUNT_JSON": "x"}, clear=True)
+    @patch("sync_leads._sheets_session_or_none")
+    def test_a_failed_write_never_clears_the_sheet(self, mock_session_fn):
+        # Hit live risk: the old clear-then-write order meant a write that failed right after a
+        # successful clear left the sheet holding nothing -- and since this sheet is the only
+        # backup once GitHub is unconfigured, a cold start right after would restore an empty
+        # database from it. The write must happen first, so a failed write leaves prior content
+        # (whatever's already in the sheet, which this test never touches) completely alone.
+        mock_session = MagicMock()
+        mock_session.put.return_value = MagicMock(status_code=500, text="server error")
+        mock_session_fn.return_value = mock_session
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "leads.csv"
+            with path.open("w", newline="") as f:
+                writer = csv.writer(f)
+                writer.writerow(["company_name", "phone"])
+                writer.writerow(["Acme Waste", "(555) 123-4567"])
+            sync_leads.push_sheets(path)
+        mock_session.post.assert_not_called()
+        self.assertEqual(sync_leads.last_backup_error, "Google Sheets push failed: HTTP 500: server error")
+
+    @patch.dict("os.environ", {"GOOGLE_SHEET_ID": "sheet123", "GOOGLE_SERVICE_ACCOUNT_JSON": "x"}, clear=True)
+    @patch("sync_leads._sheets_session_or_none")
+    def test_a_failed_tail_clear_does_not_report_the_push_as_failed(self, mock_session_fn):
+        # The write already landed at this point -- a stale trailing row or two left behind by a
+        # failed clear self-heals on the next successful push, so this must not surface as an error.
+        mock_session = MagicMock()
+        mock_session.put.return_value = MagicMock(status_code=200)
+        mock_session.post.side_effect = sync_leads.requests.RequestException("boom")
+        mock_session_fn.return_value = mock_session
+        sync_leads.last_backup_error = None  # isolate from whatever an earlier test in the run left behind
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "leads.csv"
+            with path.open("w", newline="") as f:
+                writer = csv.writer(f)
+                writer.writerow(["company_name", "phone"])
+                writer.writerow(["Acme Waste", "(555) 123-4567"])
+            sync_leads.push_sheets(path)  # must not raise
+        self.assertIsNone(sync_leads.last_backup_error)
 
     @patch.dict("os.environ", {"GOOGLE_SHEET_ID": "sheet123", "GOOGLE_SERVICE_ACCOUNT_JSON": "x"}, clear=True)
     @patch("sync_leads._sheets_session_or_none")

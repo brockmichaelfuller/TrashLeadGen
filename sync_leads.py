@@ -183,16 +183,27 @@ def push_sheets(local_path):
         return
     rows = _group_and_sort(rows)
     base = f"https://sheets.googleapis.com/v4/spreadsheets/{sheet_id}/values"
+    # Write the new content FIRST, and only clear old leftover rows *after* that write succeeds.
+    # This sheet is the only backup once GitHub is unconfigured (see restore()) -- clearing before
+    # writing meant a write that failed right after a successful clear left the sheet holding
+    # nothing, and a cold start right after that would restore an empty database from it.
     try:
-        # "A1" alone names a single cell, not the whole sheet -- clearing just that one cell left
-        # every previous run's rows past the end of a *shorter* new push (e.g. after a deletion)
-        # sitting there untouched, so the sheet kept accumulating stale leftover rows.
-        session.post(f"{base}/A1:Z100000:clear", timeout=15)
         response = session.put(f"{base}/A1?valueInputOption=RAW", json={"values": rows}, timeout=15)
-        if response.status_code != 200:
-            _warn("Google Sheets push", f"HTTP {response.status_code}: {response.text[:200]}")
     except requests.RequestException as error:
         _warn("Google Sheets push", error)
+        return
+    if response.status_code != 200:
+        _warn("Google Sheets push", f"HTTP {response.status_code}: {response.text[:200]}")
+        return
+    try:
+        # Clears anything past the new content -- e.g. rows from a previous, longer push that this
+        # one has nothing left to overwrite (after a deletion). "A1" alone names a single cell, not
+        # the whole sheet, so this has to name the actual range. A failure here just leaves a stale
+        # trailing row or two for now (it self-heals on the next successful push), not data loss --
+        # so it's a separate try, and doesn't turn an already-successful write into a reported failure.
+        session.post(f"{base}/A{len(rows) + 1}:Z100000:clear", timeout=15)
+    except requests.RequestException:
+        pass
 
 
 def pull_sheets(local_path):
