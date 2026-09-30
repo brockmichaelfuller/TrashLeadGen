@@ -26,7 +26,6 @@ ROOT = Path(__file__).parent
 sys.path.insert(0, str(ROOT))
 from lead_scraper import STATE_GROUPS, STATES, missing_fields  # noqa: E402
 import db  # noqa: E402
-import sync_leads  # noqa: E402
 DB_PATH = ROOT / "output" / "leads.db"
 INDEX_PATH = ROOT / "static" / "index.html"
 MAX_LOG_LINES = 500
@@ -112,10 +111,8 @@ def undelete_lead(db_path, phone):
 # export and copy action, so a "do not contact" or declined lead can't accidentally get dialed.
 DO_NOT_EXPORT_STATUSES = {"Not interested", "Do not contact"}
 
-# The only values the "Interested?" dropdown offers -- reusing sync_leads' canonical list (it
-# already has to know these exactly, to lay out the Google Sheet's sections) instead of a second
-# copy that could quietly drift out of sync with it.
-VALID_STATUSES = set(sync_leads.STATUS_SECTIONS)
+# The only values the "Interested?" dropdown offers.
+VALID_STATUSES = {"", "Interested", "Not interested", "Do not contact"}
 
 
 def export_csv(db_path):

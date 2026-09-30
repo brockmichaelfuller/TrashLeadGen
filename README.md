@@ -25,14 +25,14 @@ This is what Render deploys (`python app.py`, per `render.yaml`/the service's st
 | `HOST` | `127.0.0.1` (localhost only) | Set to `0.0.0.0` to accept connections from outside the machine (needs `APP_PASSWORD` — the app refuses to start on a public host without one) |
 | `APP_PASSWORD` | none (open access) | HTTP Basic Auth password. Required once `HOST` isn't localhost |
 | `APP_USERNAME` | any username accepted | Optional comma-separated allowlist of usernames, checked alongside `APP_PASSWORD` |
-| `GITHUB_TOKEN`, `GITHUB_REPO`, `GOOGLE_SERVICE_ACCOUNT_JSON`, `GOOGLE_SHEET_ID` | unset (disabled) | See "Making data permanent on Render" below |
+| `GITHUB_TOKEN`, `GITHUB_REPO`, `SUPABASE_DB_URL` | unset (disabled) | See "Making data permanent on Render" below |
 
 A few things worth knowing about the page itself:
 
 - **Scope.** "Entire U.S." runs all 50 states + DC in one subprocess; the four "Group" options split that into smaller chunks (useful on a host that can't finish the whole country in one sitting, like Render's free plan).
 - **Stop and Retry.** Stop ends the run cleanly (reported as "Stopped," not an error) and offers to continue with whatever states weren't reached. If some states fail outright (or the map data source is unreachable and the run gives up on it early — see below), a Retry button appears for just those.
 - **One list.** Every lead with a name and phone (everything actually needed to call) is on the page. Email, when OpenStreetMap has it, is a column and an optional "Has email" filter -- not a separate tab -- so Copy phones/emails and Download CSV always cover everyone, not just whichever view happens to be open.
-- **A backup warning banner** appears if the last save to GitHub/Sheets failed (see below) — it keeps retrying in the background on its own; the banner is just so a stuck backup isn't silent.
+- **A backup warning banner** appears if the last save to GitHub/Supabase failed (see below) — it keeps retrying in the background on its own; the banner is just so a stuck backup isn't silent.
 - **`/api/debug.log`** has the raw exception + traceback behind whatever plain-language message the page shows for a failed state — useful for diagnosing a *recurring* failure; not meant for the owner.
 
 ## Running the scraper directly (no web page)
@@ -52,7 +52,7 @@ Options:
 
 ## Storage
 
-Leads live in a SQLite database (`db.py`), with `phone` as the primary key -- that's what actually guarantees no duplicate, not application code. Both the web app and the scraper subprocess read and write it directly (SQLite's WAL journal mode plus a busy-timeout give real concurrent access; nothing needs its own file lock). GitHub/Google Sheets backup only ever speaks CSV, so `db.py` exports the database to a companion `output/leads.csv` right before every backup push, and imports that same file into a fresh database on restore -- the backup logic itself (`sync_leads.py`) never had to change.
+Leads live in a SQLite database (`db.py`), with `phone` as the primary key -- that's what actually guarantees no duplicate, not application code. Both the web app and the scraper subprocess read and write it directly (SQLite's WAL journal mode plus a busy-timeout give real concurrent access; nothing needs its own file lock). GitHub backup only ever speaks CSV, so `db.py` exports the database to a companion `output/leads.csv` right before every backup push, and imports that same file into a fresh database on restore. Supabase backup speaks rows directly instead (a plain per-lead upsert, not a CSV blob), reading/writing that same companion CSV as the bridge between it and the database -- either way, the backup logic itself (`sync_leads.py`) is what does the actual talking to GitHub/Supabase, never `db.py` directly.
 
 ## Output columns
 
@@ -73,9 +73,29 @@ Leads live in a SQLite database (`db.py`), with `phone` as the primary key -- th
 Render's free plan has no persistent disk: every redeploy, and every time the service spins back up after ~15 minutes idle, starts from an empty filesystem and loses whatever was scraped. `sync_leads.py` backs up a CSV export of the database externally so that doesn't lose data — it's a no-op with nothing configured, and each backend below is independently optional:
 
 - **GitHub** — commits `output/leads.csv` to this repo after every state and every edit, and restores the latest commit (into a fresh database) when the app starts with none. Set `GITHUB_TOKEN` (a personal access token with Contents read/write on this repo) and `GITHUB_REPO` (`owner/name`). **If `GITHUB_REPO` is ever set to the same repo Render deploys from**, every backup commit will also trigger a new deploy (auto-deploy watches every push to the branch) — mid-scrape, that restarts the service and kills the run. Point it at a separate repo (or a branch Render doesn't deploy) instead, or turn off auto-deploy for that branch.
-- **Google Sheets** — overwrites a sheet with the current CSV export after every state and every edit, via a Google service account. Set `GOOGLE_SERVICE_ACCOUNT_JSON` (the full service-account key JSON, as one string) and `GOOGLE_SHEET_ID` (from the sheet's URL, between `/d/` and `/edit`). Share the target sheet with the service account's `client_email` as an Editor first, or the writes will fail (see the app's log). The sheet (only the sheet — the site's own table order is untouched) is grouped into sections by the Interested? status, top to bottom: no status yet, Interested, Not interested, Do not contact, then Rejected, each separated by a blank row; within each section, complete leads (see above) come first.
+- **Supabase** — a free-tier Postgres database. Every lead is upserted as its own row, keyed on `phone`, after every state and every edit — no clear-then-rewrite of anything, so a failed push can't lose what's already there. Set `SUPABASE_DB_URL` to a Postgres connection string (from the Supabase dashboard: **Project Settings → Database → Connection string**, the **Transaction pooler** one specifically — it's on port 6543 and IPv4-compatible, which Render needs; the direct connection is IPv6-only on most regions). The table has to exist first — run this once in Supabase's **SQL Editor**:
 
-Both can be set at once — on startup the app tries GitHub first and falls back to Sheets if GitHub has nothing (so either one alone is enough to survive a restart, into a brand new database). Neither is required for local use.
+  ```sql
+  create table leads (
+    phone text primary key,
+    company_name text not null default '',
+    email text not null default '',
+    website text not null default '',
+    address text not null default '',
+    city text not null default '',
+    state text not null default '',
+    timezone text not null default '',
+    source text not null default '',
+    date_collected text not null default '',
+    status text not null default '',
+    notes text not null default '',
+    rejected_at text not null default ''
+  );
+  ```
+
+  A free Supabase project pauses itself after about a week with no activity (a scrape or an edit counts, so an actively-used app won't trigger this) — a paused project is resumed from the Supabase dashboard with one click, and nothing is lost while paused, it just won't back up until you resume it.
+
+Both GitHub and Supabase can be set at once — on startup the app tries GitHub first and falls back to Supabase if GitHub has nothing (so either one alone is enough to survive a restart, into a brand new database). Neither is required for local use.
 
 A save from the web page (a status/notes edit or a delete/undo) writes to disk immediately and returns right away; the backup push happens a few seconds later in the background, so a burst of edits results in one push, not one per keystroke-save. If a push fails, it keeps retrying automatically every 30 seconds until one succeeds (or a new edit reschedules it sooner), and the page shows a banner for as long as the most recent attempt is still failing. A scrape backs up after every state regardless of whether the previous state's push succeeded, so a failure there self-corrects on the very next state.
 
@@ -84,7 +104,7 @@ A save from the web page (a status/notes edit or a delete/undo) writes to disk i
 | What | How | How fast |
 |---|---|---|
 | A running scrape | Click **Stop** on the page, or `POST /api/stop` | Immediate — the scraper subprocess is killed outright |
-| External backups (GitHub/Sheets) | Click **Pause external backups** in the page header, or `POST /api/backups {"paused": true}` | Immediate, and doesn't restart the service (an environment variable change would). Local saves keep working; nothing pushes until you **Resume external backups** (or `{"paused": false}`) |
+| External backups (GitHub/Supabase) | Click **Pause external backups** in the page header, or `POST /api/backups {"paused": true}` | Immediate, and doesn't restart the service (an environment variable change would). Local saves keep working; nothing pushes until you **Resume external backups** (or `{"paused": false}`) |
 | The whole app | Stop the process (Ctrl+C locally; suspend/delete the service on Render) | Immediate, but Render's free plan has no persistent disk — see below before relying on this |
 
 Anyone who can reach the page (i.e. anyone with the `APP_PASSWORD`, once one is set) can do any of these; there's no separate owner role.
