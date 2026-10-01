@@ -108,7 +108,43 @@ class MoreTests(unittest.TestCase):
         # name -- e.g. "Rumpke" has none of NAME_KEYWORDS in it, so without an explicit allowlist
         # they'd be silently invisible even though they're exactly who this tool should find.
         for name in ("Rumpke", "Recology", "Republic Services", "Burrtec", "Athens Services", "GFL Environmental",
-                     "Curbie Sanitation"):
+                     "Curbie Sanitation", "WM"):
+            tags = {"name": name, "phone": "303-343-7096"}
+            self.assertIsNotNone(element_to_row({"type": "node", "id": 1, "tags": tags}, "CO", "x"), name)
+
+    def test_wm_does_not_false_match_as_a_substring_of_unrelated_words(self):
+        # "WM" is two letters -- without \b boundaries on brand matching it would match inside any
+        # word containing that letter pair, not just real WM listings. None of these contain an
+        # actual NAME_KEYWORDS word, so the only way one could pass is a buggy substring brand match.
+        for name in ("Lawman Services", "Newman Hauling Services", "Sawmill Services"):
+            tags = {"name": name, "phone": "303-343-7096"}
+            self.assertIsNone(element_to_row({"type": "node", "id": 1, "tags": tags}, "CO", "x"), name)
+
+    def test_town_and_place_names_are_not_mistaken_for_excluded_categories(self):
+        # Reproduced against the live regex: water/marine/boat/metal/pest used to match as bare
+        # substrings, silently dropping real haulers whose name just happens to contain the letters.
+        for name in ("Watertown Disposal", "Bridgewater Waste Services", "Clearwater Garbage Service",
+                     "Waterloo Refuse Company", "Marinette Refuse", "Metalline Disposal",
+                     "Boatright Waste", "Tempest Waste Hauling"):
+            tags = {"name": name, "phone": "303-343-7096"}
+            self.assertIsNotNone(element_to_row({"type": "node", "id": 1, "tags": tags}, "CO", "x"), name)
+        # The whole-word versions must still catch the real exclusion targets these were added for.
+        for name in ("ABC Water Utility", "Metro Water District", "Acme Pest Control Waste Removal",
+                     "Marine Sanitation & Supply", "ABC Scrap Metal Recycling"):
+            tags = {"name": name, "phone": "303-343-7096"}
+            self.assertIsNone(element_to_row({"type": "node", "id": 1, "tags": tags}, "CO", "x"), name)
+
+    def test_a_branded_regional_division_is_not_excluded_for_saying_division(self):
+        # "Division" alone used to be excluded unconditionally -- a real hauler's own regional
+        # division naming shouldn't be dropped just for using an ordinary corporate-structure word.
+        tags = {"name": "Waste Management Southern Division", "phone": "303-343-7096"}
+        self.assertIsNotNone(element_to_row({"type": "node", "id": 1, "tags": tags}, "CO", "x"))
+
+    def test_solid_waste_alone_is_not_excluded_without_a_government_qualifier(self):
+        # "Solid Waste Services" is ordinary commercial-hauler naming, not uniquely a government
+        # program -- only excluded now when paired with "county" (see test_municipal_solid_waste_
+        # divisions_are_excluded for the real county programs this must keep catching).
+        for name in ("Alpine Solid Waste Services", "Acme Solid Waste Disposal"):
             tags = {"name": name, "phone": "303-343-7096"}
             self.assertIsNotNone(element_to_row({"type": "node", "id": 1, "tags": tags}, "CO", "x"), name)
 

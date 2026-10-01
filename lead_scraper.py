@@ -55,24 +55,46 @@ KEYWORD_NAME = re.compile(rf"\b({NAME_REGEX})s?\b", re.I)
 KNOWN_BRANDS = [
     "Republic Services", "Waste Management", "Waste Connections", "Rumpke", "Recology", "Burrtec",
     "Athens Services", "GFL Environmental", "Casella Waste", "Waste Pro", "WCA Waste",
-    "Advanced Disposal", "County Waste", "Curbie Sanitation",
+    "Advanced Disposal", "County Waste", "Curbie Sanitation", "WM",
 ]
-BRAND_REGEX = "|".join(re.escape(b) for b in KNOWN_BRANDS)
+# \b on every brand, not just the obviously-needed ones -- "WM" (Waste Management's current short
+# brand) is two letters, and without word boundaries it would match as a substring of thousands of
+# unrelated words ("whatsoever", "lawman", ...), not just real WM listings.
+BRAND_REGEX = "|".join(rf"\b{re.escape(b)}\b" for b in KNOWN_BRANDS)
 BRAND_NAME = re.compile(BRAND_REGEX, re.I)
 # Keep only private garbage/waste pickup companies: drop utilities, medical/hazardous waste, marine and
 # portable sanitation, landfills/transfer stations, scrap and recycling yards, equipment sellers, and
-# public agencies. Used by both scrapers and by clean_existing().
+# public agencies.
 # "Residential curb pickup" means normal weekly garbage-truck service, not: dumpster rental /
 # roll-off / junk hauling / bulk-item pickup, construction & demolition debris, corporate offices /
 # sustainability campuses, retail stores selling zero-waste products, moving companies, or
 # pet-waste scoopers.
+#
+# water/pest/marine/boat/metal are deliberately whole-word (\b...\b): bare substrings matched inside
+# unrelated real names -- "Watertown Disposal", "Bridgewater Waste Services", "Clearwater Garbage
+# Service", "Marinette Refuse", "Metalline Disposal", "Boatright Waste" -- silently dropping real
+# haulers whose name just happens to contain the letters. A whole-word "water"/"marine"/etc. still
+# catches the actual utility/pest-control/scrap-metal businesses these were added for.
+#
+# \bsolid waste\b used to be bare, excluding any name containing the phrase at all -- but that's also
+# ordinary commercial-hauler naming (e.g. "Alpine Solid Waste Services"), not just a government
+# program. Real county solid-waste programs reliably name the county too (see
+# test_municipal_solid_waste_divisions_are_excluded's "Hertford County Solid Waste" and "Avery County
+# Solid Waste MRS" -- neither has any other word this list would catch), so this now requires "solid
+# waste" and "county" to both appear, in either order, rather than "solid waste" alone. A bare
+# "division" is no longer excluded on its own either (a real hauler's branded regional division, e.g.
+# "Acme Waste - Southern Division", shouldn't be dropped just for having a corporate-structure word in
+# it) -- "Jefferson County Solid Waste Division" above is still caught by the county+solid-waste rule
+# regardless, and department/bureau/commission/agency/authority/municipal still catch other
+# government units that don't happen to say "solid waste".
 EXCLUDE_NAME = re.compile(
-    r"water|sewer|sewage|septic|medical|biohazard|hazardous|hazmat|marine|boat|\bsupply\b|supplies|equipment|"
-    r"pest|plumb|landfill|\btransfer\b|material recovery|\bsolid waste\b|yard waste|"
-    r"recycl(e|ing) (center|facility|depot)|scrap|salvage|metal|mattress|"
+    r"\bwater\b|sewer|sewage|septic|medical|biohazard|hazardous|hazmat|\bmarine\b|\bboat\b|\bsupply\b|supplies|equipment|"
+    r"\bpest\b|plumb|landfill|\btransfer\b|material recovery|"
+    r"\bcounty\b.*\bsolid waste\b|\bsolid waste\b.*\bcounty\b|yard waste|"
+    r"recycl(e|ing) (center|facility|depot)|scrap|salvage|\bmetal\b|mattress|"
     r"waste paper|waste material|waste[- ]to[- ]energy|\bvehicle|liquidat|"
     r"e-?waste|electronic|shred|portable|porta[- ]?(potty|john)|toilet|restroom|cleaning|janitor|"
-    r"\b(city|town|village|county|township|state) of\b|\b(department|dept|division|bureau|commission|agency|"
+    r"\b(city|town|village|county|township|state) of\b|\b(department|dept|bureau|commission|agency|"
     r"authority|public works|municipal|school|hospital|clinic|dental|veterinary)\b|\bfacility\b|"
     r"drop[- ]?off|collection center|convenience center|disposal area|"
     r"dumpster|roll[- ]?off|\bjunk\b|\bbulk\b|construction|demolition|debris|industrial|"
