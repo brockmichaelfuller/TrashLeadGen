@@ -159,7 +159,52 @@ class StatusAndNotesTests(BrowserTestCase):
         self.page.locator("td.interested select").select_option("Interested")
         # Scoped to #rows -- #undoErr also carries the shared .row-err class, sitting earlier in the
         # DOM (in the header), so an unscoped .row-err selector would match that empty span first.
-        expect(self.page.locator("#rows .row-err").first).to_have_text("simulated failure")
+        expect(self.page.locator("#rows .row-err").first).to_contain_text("Not saved — simulated failure")
+
+    def test_a_failed_status_save_reverts_the_dropdown_and_never_auto_hides(self):
+        # Hit live: a 5s auto-fading error read exactly like success once it faded -- the dropdown
+        # kept the unsaved value with nothing on screen to say it hadn't actually been recorded.
+        db.insert_if_new(self.db_path, {"phone": "111", "company_name": "A", "status": "Interested"})
+        self.goto()
+        self.page.route("**/api/lead", lambda route: route.fulfill(
+            status=500, content_type="application/json", body=json.dumps({"error": "server exploded"})))
+        sel = self.page.locator("td.interested select")
+        sel.select_option("Not interested")
+        expect(self.page.locator("#rows .row-err").first).to_contain_text("Not saved — server exploded")
+        expect(sel).to_have_value("Interested")  # reverted -- never shows an unsaved value as current
+        self.page.wait_for_timeout(5500)  # well past the old 5s auto-fade
+        expect(self.page.locator("#rows .row-err").first).to_be_visible()
+        self.assertEqual(db.all_leads(self.db_path)[0]["status"], "Interested")  # unchanged in the database
+
+    def test_retrying_a_failed_status_save_clears_the_error_once_it_succeeds(self):
+        db.insert_if_new(self.db_path, {"phone": "111", "company_name": "A"})
+        self.goto()
+        self.page.route("**/api/lead", lambda route: route.fulfill(
+            status=500, content_type="application/json", body=json.dumps({"error": "server exploded"})))
+        sel = self.page.locator("td.interested select")
+        sel.select_option("Interested")
+        expect(self.page.locator("#rows .row-err").first).to_be_visible()
+
+        self.page.unroute("**/api/lead")
+        self.page.locator("#rows .row-err .link", has_text="Retry").first.click()
+        expect(self.page.locator("#rows .row-err").first).to_be_hidden(timeout=5000)
+        self.assertEqual(db.all_leads(self.db_path)[0]["status"], "Interested")
+
+    def test_a_failed_notes_save_keeps_the_typed_text_instead_of_reverting_it(self):
+        # Unlike status, notes is free-typed text the owner doesn't want to lose on a failure -- it
+        # stays in the field, just marked unsaved, rather than snapping back to the old value.
+        db.insert_if_new(self.db_path, {"phone": "111", "company_name": "A"})
+        self.goto()
+        self.page.route("**/api/lead", lambda route: route.fulfill(
+            status=500, content_type="application/json", body=json.dumps({"error": "server exploded"})))
+        notes = self.page.locator(".notes-input")
+        notes.fill("Left a voicemail")
+        notes.blur()
+        # nth(1): the row's second .row-err in DOM order (status's, then notes') -- see the same
+        # pattern used for .saved-tag above.
+        expect(self.page.locator("#rows .row-err").nth(1)).to_contain_text("Not saved — server exploded")
+        expect(notes).to_have_value("Left a voicemail")
+        expect(notes).to_have_class("notes-input unsaved")
 
 
 class RemoveUndoTests(BrowserTestCase):

@@ -77,6 +77,8 @@
   .saved-tag.show { opacity: 1; }
   .row-err { color: var(--danger); font-size: 11px; font-weight: 600; opacity: 0; transition: opacity .25s; white-space: normal; }
   .row-err.show { opacity: 1; }
+  .row-err .link { font-size: 11px; font-weight: 600; }
+  select.unsaved, input.unsaved { border-color: var(--danger); outline: 1px solid var(--danger); }
   tr.excluded { opacity: .5; }
   th { color: var(--muted); font-weight: 600; font-size: 12px; cursor: pointer; user-select: none; }
   th:hover { color: var(--text); }
@@ -240,6 +242,29 @@ function flashRowError(tag, message) {
   tag._hideTimer = setTimeout(() => { tag.classList.remove("show"); tag.textContent = ""; }, 5000);
 }
 
+// A failed status/notes save used to show the same fading error as everything else -- faded out
+// after 5s, it read exactly like a successful save: the dropdown kept the new value, the typed
+// note stayed in the field, and the row looked done. This one never auto-hides; it stays until a
+// retry actually succeeds (clearUnsavedError), with its own Retry control right there.
+function flashUnsavedError(tag, field, message, retry) {
+  clearTimeout(tag._hideTimer);
+  tag.classList.add("show");
+  tag.replaceChildren(`Not saved — ${message}. `);
+  const retryBtn = document.createElement("button");
+  retryBtn.type = "button";
+  retryBtn.className = "link";
+  retryBtn.textContent = "Retry";
+  retryBtn.onclick = retry;
+  tag.append(retryBtn);
+  field.classList.add("unsaved");
+}
+
+function clearUnsavedError(tag, field) {
+  tag.classList.remove("show");
+  tag.replaceChildren();
+  field.classList.remove("unsaved");
+}
+
 const DO_NOT_EXPORT = new Set(["Not interested", "Do not contact"]);
 
 function statusCell(l) {
@@ -254,11 +279,23 @@ function statusCell(l) {
   }
   sel.value = l.status || "";
   const tag = savedTag(), err = errorTag();
-  sel.onchange = async () => {
-    l.status = sel.value;
-    try { await saveLead(l.phone, { status: sel.value }); flashSaved(tag); renderLeads(); }
-    catch (e) { flashRowError(err, e.message); }
+  const trySave = async (value) => {
+    const previous = l.status;
+    try {
+      await saveLead(l.phone, { status: value });
+      l.status = value;
+      clearUnsavedError(err, sel);
+      flashSaved(tag);
+      renderLeads();
+    } catch (e) {
+      // The save didn't happen -- the dropdown must not keep showing a value that was never
+      // actually recorded, which previously made a failed save indistinguishable from a successful
+      // one once the old 5s error faded.
+      sel.value = previous;
+      flashUnsavedError(err, sel, e.message, () => trySave(value));
+    }
   };
+  sel.onchange = () => trySave(sel.value);
   wrap.append(sel, tag, err);
   td.append(wrap);
   return td;
@@ -276,10 +313,21 @@ function notesCell(l) {
   inp.setAttribute("aria-label", `Notes for ${l.company_name || l.phone}`);
   inp.value = l.notes || "";
   const tag = savedTag(), err = errorTag();
-  const doSave = debounce(async () => {
-    try { await saveLead(l.phone, { notes: inp.value }); flashSaved(tag); }
-    catch (e) { flashRowError(err, e.message); }
-  }, 600);
+  // Reads inp.value fresh at save time (not a value closed over earlier), so a retry after typing
+  // more text sends the latest draft, not whatever was in the box when the first attempt failed.
+  // Unlike the status dropdown, a failed save never reverts what's in the field -- it's free-typed
+  // text the owner doesn't want to lose, just marked unsaved until a retry actually lands.
+  const trySave = async () => {
+    const value = inp.value;
+    try {
+      await saveLead(l.phone, { notes: value });
+      clearUnsavedError(err, inp);
+      flashSaved(tag);
+    } catch (e) {
+      flashUnsavedError(err, inp, e.message, trySave);
+    }
+  };
+  const doSave = debounce(trySave, 600);
   // Saves as you type (debounced so it's not a request per keystroke), and immediately on blur so
   // clicking away right after typing doesn't lose the last half-second of edits.
   inp.oninput = () => { l.notes = inp.value; doSave(); };
