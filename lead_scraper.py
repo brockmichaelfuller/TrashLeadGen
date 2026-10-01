@@ -388,7 +388,16 @@ def _attempt_state(state, db_path, seen, today):
 
 def run(db_path, states):
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    db.restore_if_empty(db_path)
+    restore_error = db.restore_if_empty(db_path)
+    if restore_error:
+        # Scraping into a database that's empty only because restoring the real one failed would
+        # re-insert every lead fresh with blank status/notes/rejected_at -- the next backup then
+        # upserts those blanks straight over Supabase's real values. app.py's own /api/run already
+        # refuses to start a scrape in this state; this is the same guard for direct CLI use.
+        print(f"Refusing to scrape: couldn't restore the saved leads ({restore_error}). Fix the "
+              "backup connection and try again once it's confirmed working -- scraping now would "
+              "overwrite real data with blanks on the next backup.", file=sys.stderr)
+        return
     db.import_audit_log_rejections(db_path)
     seen = db.existing_phones(db_path)
     today = date.today().isoformat()

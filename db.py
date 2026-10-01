@@ -223,9 +223,20 @@ def restore_if_empty(db_path):
     """Recover prior runs' data on a fresh (empty) host: pull the last backup into the companion CSV
     and import it -- but only when there's actually nothing here yet, since an existing database is
     always the more current copy. Both app.py (on startup) and lead_scraper.py (at the start of a
-    run) call this, so a fresh container ends up with real data regardless of which one runs first."""
+    run) call this, so a fresh container ends up with real data regardless of which one runs first.
+
+    Returns the failure message if a configured backend actually errored during restore, or None
+    otherwise. Hit live: a transient Supabase outage at start-up used to be treated exactly like a
+    genuinely-new install -- the database stayed empty, the page showed "No leads yet", and a scrape
+    run from that state re-inserted every lead fresh with blank status/notes/rejected_at, which the
+    next backup then upserted straight over Supabase's real values. Callers MUST check this return
+    value and refuse to proceed (no scrape, no backup push) rather than treat a non-None result as
+    if the database were just empty -- see app.py's restore_state and lead_scraper.py's run()."""
     if not is_empty(db_path):
-        return
+        return None
     csv_path = Path(db_path).with_suffix(".csv")
-    sync_leads.restore(csv_path)
+    error = sync_leads.restore(csv_path)
+    if error:
+        return error
     import_from_csv(db_path, csv_path)
+    return None

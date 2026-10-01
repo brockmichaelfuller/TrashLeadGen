@@ -48,6 +48,21 @@ SYNC_RETRY_SECONDS = 30
 backup_state = {"error": None}
 _sync_timer = None
 
+# Set once at startup (and again on a manual retry) if the one-time restore of a fresh/empty
+# database failed -- see db.restore_if_empty's docstring for why a failed restore must never be
+# treated like a database that's just genuinely new. While this holds an error, the page must
+# refuse to start a scrape (see start_run) and must not show the ordinary "No leads yet" message,
+# since there's no way to tell that apart from "the real leads are one retry away".
+restore_state = {"error": None}
+
+
+def attempt_restore():
+    error = db.restore_if_empty(DB_PATH)
+    restore_state["error"] = error
+    if not error:
+        db.import_audit_log_rejections(DB_PATH)
+    return error
+
 
 def _run_sync():
     global _sync_timer
@@ -221,6 +236,12 @@ def user_facing_log(log_lines):
 def start_run(group_id="all", explicit_states=None):
     """One scrape: the whole U.S., one ~13-state group, or (for the "retry failed" button) an
     explicit list of state codes."""
+    if restore_state["error"]:
+        # Scraping now would re-insert every lead fresh with blank status/notes/rejected_at, which
+        # the next backup push would then upsert straight over Supabase's real values -- see
+        # db.restore_if_empty's docstring. Retry the restore (the page offers a button for this)
+        # before a scrape is allowed to run at all.
+        return "Can't scrape yet -- the saved leads haven't been restored. Try the restore again first."
     if explicit_states:
         states = [s.upper() for s in explicit_states]
         # "retry: RI, CT, DE" (the raw scope value) used to show up verbatim in the page's headline
@@ -383,7 +404,8 @@ class Handler(BaseHTTPRequestHandler):
                             "finishedCount": len(finished),
                             "plannedCount": len(planned) if planned else None,
                             "backupError": backup_state["error"],
-                            "backupsPaused": db.backups_paused(DB_PATH)})
+                            "backupsPaused": db.backups_paused(DB_PATH),
+                            "restoreError": restore_state["error"]})
         elif path == "/api/groups":
             self.send_json({"groups": GROUPS})
         elif path == "/api/export.csv":
@@ -415,6 +437,10 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/backups":
             db.set_backups_paused(DB_PATH, bool(data.get("paused")))
             return self.send_json({"ok": True})
+        if path == "/api/restore/retry":
+            with lock:
+                error = attempt_restore()
+            return self.send_json({"error": error}, 400) if error else self.send_json({"ok": True})
         if path == "/api/lead":
             phone = (data.get("phone") or "").strip()
             updates = {k: data.get(k, "") for k in ("status", "notes") if k in data}
@@ -457,8 +483,7 @@ def main():
     host = os.environ.get("HOST", "127.0.0.1")
     if host != "127.0.0.1" and not os.environ.get("APP_PASSWORD"):
         sys.exit("Refusing to listen on the network without APP_PASSWORD set.")
-    db.restore_if_empty(DB_PATH)  # recover the last backup, since a fresh host starts with no database
-    db.import_audit_log_rejections(DB_PATH)
+    attempt_restore()  # recover the last backup, since a fresh host starts with no database
     server = ThreadingHTTPServer((host, args.port), Handler)
     print(f"TrashLeadGen UI: http://{host}:{args.port}  (Ctrl+C to stop)", flush=True)
     try:

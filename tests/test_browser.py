@@ -255,5 +255,39 @@ class BackupPauseTests(BrowserTestCase):
         self.assertFalse(db.backups_paused(self.db_path))
 
 
+class RestoreFailureTests(BrowserTestCase):
+    """A failed restore at start-up must never look like an ordinary empty, new install -- see
+    db.restore_if_empty's docstring for the real bug this guards against (a scrape re-inserting
+    every lead fresh with blank status/notes/rejected_at, which the next backup then pushes
+    straight over Supabase's real values)."""
+
+    def setUp(self):
+        super().setUp()
+        app.restore_state["error"] = "Supabase pull failed: timeout"
+        self.addCleanup(lambda: app.restore_state.update(error=None))
+
+    def test_shows_a_blocking_message_not_the_ordinary_empty_state(self):
+        self.goto()
+        expect(self.page.locator("#restoreWarn")).to_be_visible()
+        expect(self.page.locator("#restoreWarnText")).to_contain_text("Supabase pull failed: timeout")
+        expect(self.page.locator("#empty")).to_be_visible()
+        expect(self.page.locator("#empty")).to_contain_text("Couldn't load your saved leads")
+        expect(self.page.locator("#empty")).not_to_contain_text("No leads yet")
+
+    def test_run_scrape_is_disabled(self):
+        self.goto()
+        expect(self.page.locator("#run")).to_be_disabled()
+
+    def test_try_again_clears_the_banner_once_restore_succeeds(self):
+        # Pre-seeding a lead is enough on its own to make the real restore_if_empty() succeed (it
+        # only even attempts a restore when the database is actually empty), so Try again can be
+        # exercised against the real retry endpoint rather than a mocked one.
+        db.insert_if_new(self.db_path, {"phone": "111", "company_name": "Recovered Co"})
+        self.goto()
+        self.page.locator("#retryRestore").click()
+        expect(self.page.locator("#restoreWarn")).to_be_hidden(timeout=5000)
+        expect(self.page.locator("#run")).to_be_enabled()
+
+
 if __name__ == "__main__":
     unittest.main()

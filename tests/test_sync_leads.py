@@ -171,6 +171,68 @@ class SupabaseEnabledTests(unittest.TestCase):
         self.assertEqual(values, [("Acme Waste", "(555) 123-4567")])
 
     @patch.dict("os.environ", {"SUPABASE_DB_URL": "postgresql://x"}, clear=True)
+    def test_status_and_notes_use_a_never_blank_update_clause_but_other_columns_do_not(self):
+        # Defense in depth against the restore-failure overwrite bug: even if a scrape somehow runs
+        # against a wrongly-empty local database, an incoming blank status/notes must never erase a
+        # real one already in Supabase. rejected_at is deliberately excluded -- see NEVER_BLANK_COLUMNS.
+        mock_psycopg2, mock_cur, mock_extras = _fake_psycopg2_module()
+        with patch.dict(sys.modules, {"psycopg2": mock_psycopg2, "psycopg2.extras": mock_extras}):
+            with tempfile.TemporaryDirectory() as tmp:
+                path = Path(tmp) / "leads.csv"
+                with path.open("w", newline="") as f:
+                    writer = csv.writer(f)
+                    writer.writerow(["phone", "status", "notes", "rejected_at", "company_name"])
+                    writer.writerow(["111", "", "", "", "Acme"])
+                sync_leads.push_supabase(path)
+        _, query, _ = mock_extras.execute_values.call_args.args
+        self.assertIn('"status" = CASE WHEN EXCLUDED."status" = \'\' THEN leads."status" ELSE EXCLUDED."status" END', query)
+        self.assertIn('"notes" = CASE WHEN EXCLUDED."notes" = \'\' THEN leads."notes" ELSE EXCLUDED."notes" END', query)
+        self.assertIn('"rejected_at" = EXCLUDED."rejected_at"', query)  # no CASE guard -- Undo must propagate
+        self.assertIn('"company_name" = EXCLUDED."company_name"', query)
+
+    @patch.dict("os.environ", {"SUPABASE_DB_URL": "postgresql://x"}, clear=True)
+    def test_reproduces_the_overwrite_bug_scenario_and_proves_the_backstop_holds(self):
+        # The exact sequence the report reproduced live: a real "Do not contact" lead with notes
+        # already in Supabase, then a fresh local row for the same phone with blank status/notes
+        # (what a scrape run against a wrongly-empty local database would produce). The backstop
+        # must keep Supabase's real values no matter what blank row gets pushed at it.
+        table = {}
+
+        def fake_execute_values(cur, query, values):
+            for row in values:
+                phone = row[0]
+                incoming = dict(zip(["phone", "status", "notes", "rejected_at", "company_name"], row))
+                existing = table.get(phone, {"status": "", "notes": "", "rejected_at": "", "company_name": ""})
+                merged = dict(incoming)
+                for col in ("status", "notes"):  # mirrors the real CASE WHEN guard
+                    if incoming[col] == "":
+                        merged[col] = existing[col]
+                table[phone] = merged
+
+        mock_psycopg2, mock_cur, mock_extras = _fake_psycopg2_module()
+        mock_extras.execute_values.side_effect = fake_execute_values
+        with patch.dict(sys.modules, {"psycopg2": mock_psycopg2, "psycopg2.extras": mock_extras}):
+            with tempfile.TemporaryDirectory() as tmp:
+                # Supabase already has the real, decided lead.
+                real_path = Path(tmp) / "real.csv"
+                with real_path.open("w", newline="") as f:
+                    writer = csv.writer(f)
+                    writer.writerow(["phone", "status", "notes", "rejected_at", "company_name"])
+                    writer.writerow(["111", "Do not contact", "said stop calling", "", "Real Hauler Co"])
+                sync_leads.push_supabase(real_path)
+
+                # A scrape against a wrongly-empty local database re-finds the same phone, fresh.
+                blank_path = Path(tmp) / "blank.csv"
+                with blank_path.open("w", newline="") as f:
+                    writer = csv.writer(f)
+                    writer.writerow(["phone", "status", "notes", "rejected_at", "company_name"])
+                    writer.writerow(["111", "", "", "", "Real Hauler Co"])
+                sync_leads.push_supabase(blank_path)
+
+        self.assertEqual(table["111"]["status"], "Do not contact")
+        self.assertEqual(table["111"]["notes"], "said stop calling")
+
+    @patch.dict("os.environ", {"SUPABASE_DB_URL": "postgresql://x"}, clear=True)
     def test_push_skips_rows_with_no_phone(self):
         # A stray blank separator row (or any row with no phone) must never reach the upsert --
         # phone is the primary key, so an empty one would collide with every other empty one.
@@ -294,23 +356,70 @@ class SupabaseEnabledTests(unittest.TestCase):
 
 
 class RestoreTests(unittest.TestCase):
-    @patch("sync_leads.pull_supabase")
-    @patch("sync_leads.pull_github")
-    def test_falls_back_to_supabase_when_github_yields_nothing(self, mock_pull_github, mock_pull_supabase):
-        with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "leads.csv"  # pull_github is mocked to a no-op, so this stays missing
-            sync_leads.restore(path)
-        mock_pull_github.assert_called_once_with(path)
-        mock_pull_supabase.assert_called_once_with(path)
+    """restore()'s priority used to be GitHub-first unconditionally -- a stale GitHub copy could
+    then win over a fully current Supabase, even though Supabase is where the owner decided leads
+    actually live. Supabase goes first whenever it's configured; GitHub is now only a fallback."""
 
+    @patch.dict("os.environ", {"SUPABASE_DB_URL": "postgresql://x"}, clear=True)
     @patch("sync_leads.pull_supabase")
     @patch("sync_leads.pull_github")
-    def test_skips_supabase_when_github_already_restored_data(self, mock_pull_github, mock_pull_supabase):
+    def test_supabase_is_preferred_and_github_is_never_even_consulted(self, mock_pull_github, mock_pull_supabase):
+        mock_pull_supabase.side_effect = lambda p: p.write_text("company_name,phone\nA,555\n")
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "leads.csv"
-            mock_pull_github.side_effect = lambda p: p.write_text("company_name,phone\nA,555\n")
-            sync_leads.restore(path)
-        mock_pull_supabase.assert_not_called()
+            error = sync_leads.restore(path)
+        mock_pull_github.assert_not_called()
+        self.assertIsNone(error)
+
+    @patch.dict("os.environ", {}, clear=True)
+    @patch("sync_leads.pull_supabase")
+    @patch("sync_leads.pull_github")
+    def test_falls_back_to_github_when_supabase_is_not_configured(self, mock_pull_github, mock_pull_supabase):
+        mock_pull_github.side_effect = lambda p: p.write_text("company_name,phone\nA,555\n")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "leads.csv"
+            error = sync_leads.restore(path)
+        mock_pull_supabase.assert_not_called()  # not configured -- never even tried
+        self.assertIsNone(error)
+
+    @patch.dict("os.environ", {"SUPABASE_DB_URL": "postgresql://x"}, clear=True)
+    @patch("sync_leads.pull_supabase")
+    @patch("sync_leads.pull_github")
+    def test_falls_back_to_github_when_supabase_errors(self, mock_pull_github, mock_pull_supabase):
+        # Supabase is unreachable (not just empty) -- a possibly-stale real GitHub backup still
+        # beats having nothing, so it's tried as a fallback rather than giving up immediately.
+        def failing_pull(p):
+            sync_leads._warn("Supabase pull", "connection refused")
+        mock_pull_supabase.side_effect = failing_pull
+        mock_pull_github.side_effect = lambda p: p.write_text("company_name,phone\nA,555\n")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "leads.csv"
+            error = sync_leads.restore(path)
+            self.assertEqual(path.read_text(), "company_name,phone\nA,555\n")
+        self.assertIsNone(error)  # GitHub's data recovered the situation
+
+    @patch.dict("os.environ", {"SUPABASE_DB_URL": "postgresql://x"}, clear=True)
+    @patch("sync_leads.pull_supabase")
+    @patch("sync_leads.pull_github")
+    def test_reports_the_supabase_error_when_nothing_else_has_data_either(self, mock_pull_github, mock_pull_supabase):
+        # This is the dangerous case db.restore_if_empty must never mistake for "genuinely empty":
+        # Supabase (where the real data lives) is unreachable, and GitHub has nothing either.
+        def failing_pull(p):
+            sync_leads._warn("Supabase pull", "connection refused")
+        mock_pull_supabase.side_effect = failing_pull
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "leads.csv"  # pull_github is mocked to a no-op, stays missing
+            error = sync_leads.restore(path)
+        self.assertIn("Supabase pull failed", error)
+
+    @patch.dict("os.environ", {}, clear=True)
+    @patch("sync_leads.pull_supabase")
+    @patch("sync_leads.pull_github")
+    def test_neither_configured_is_not_an_error(self, mock_pull_github, mock_pull_supabase):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "leads.csv"
+            error = sync_leads.restore(path)
+        self.assertIsNone(error)
 
 
 if __name__ == "__main__":

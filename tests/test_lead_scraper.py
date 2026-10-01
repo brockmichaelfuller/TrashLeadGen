@@ -257,7 +257,7 @@ class RunResilienceTests(unittest.TestCase):
             # is fine throughout. insert_if_new already landed the row before sync_backup is called,
             # so a sync failure doesn't lose the row -- it just gets logged as this state failing.
             with patch("lead_scraper.fetch_elements", side_effect=lambda state: elements[state]), \
-                 patch.object(db.sync_leads, "restore"), \
+                 patch.object(db.sync_leads, "restore", return_value=None), \
                  patch.object(db.sync_leads, "sync",
                                side_effect=[RuntimeError("simulated backup failure"), None, None]), \
                  patch("lead_scraper.time.sleep"):
@@ -273,7 +273,7 @@ class RunResilienceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             db_path = Path(tmp) / "leads.db"
             with patch("lead_scraper.fetch_elements", side_effect=lambda state: elements[state]), \
-                 patch.object(db.sync_leads, "restore"), \
+                 patch.object(db.sync_leads, "restore", return_value=None), \
                  patch.object(db.sync_leads, "sync", return_value="GitHub push failed: HTTP 500"), \
                  patch("lead_scraper.time.sleep"), \
                  patch("builtins.print") as mock_print:
@@ -286,7 +286,7 @@ class RunResilienceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             db_path = Path(tmp) / "leads.db"
             with patch("lead_scraper.fetch_elements", side_effect=lambda state: elements[state]), \
-                 patch.object(db.sync_leads, "restore"), \
+                 patch.object(db.sync_leads, "restore", return_value=None), \
                  patch.object(db.sync_leads, "sync", return_value=None), \
                  patch("lead_scraper.time.sleep"), \
                  patch("builtins.print") as mock_print:
@@ -298,7 +298,7 @@ class RunResilienceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             db_path = Path(tmp) / "leads.db"
             with patch("lead_scraper.fetch_elements", side_effect=RuntimeError("still down")), \
-                 patch.object(db.sync_leads, "restore"), \
+                 patch.object(db.sync_leads, "restore", return_value=None), \
                  patch.object(db.sync_leads, "sync"), \
                  patch("lead_scraper.time.sleep"), \
                  patch("builtins.print") as mock_print:
@@ -314,7 +314,7 @@ class RunResilienceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             db_path = Path(tmp) / "leads.db"
             with patch("lead_scraper.fetch_elements", side_effect=ConnectionError("Connection refused")), \
-                 patch.object(db.sync_leads, "restore"), \
+                 patch.object(db.sync_leads, "restore", return_value=None), \
                  patch.object(db.sync_leads, "sync"), \
                  patch("lead_scraper.time.sleep"), \
                  patch("builtins.print") as mock_print:
@@ -333,7 +333,7 @@ class RunResilienceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             db_path = Path(tmp) / "leads.db"
             with patch("lead_scraper.fetch_elements", side_effect=RuntimeError("403 Client Error: Forbidden")), \
-                 patch.object(db.sync_leads, "restore"), \
+                 patch.object(db.sync_leads, "restore", return_value=None), \
                  patch.object(db.sync_leads, "sync"), \
                  patch("lead_scraper.time.sleep"), \
                  patch("builtins.print") as mock_print:
@@ -352,7 +352,7 @@ class RunResilienceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             db_path = Path(tmp) / "leads.db"
             with patch("lead_scraper.fetch_elements", side_effect=TimeoutError("timed out")), \
-                 patch.object(db.sync_leads, "restore"), \
+                 patch.object(db.sync_leads, "restore", return_value=None), \
                  patch.object(db.sync_leads, "sync"), \
                  patch("lead_scraper.time.sleep"), \
                  patch("builtins.print") as mock_print:
@@ -378,7 +378,7 @@ class RunResilienceTests(unittest.TestCase):
 
             with patch("lead_scraper.fetch_elements", side_effect=RuntimeError("boom")), \
                  patch("lead_scraper.log_debug_detail", side_effect=flaky_log_debug_detail), \
-                 patch.object(db.sync_leads, "restore"), \
+                 patch.object(db.sync_leads, "restore", return_value=None), \
                  patch.object(db.sync_leads, "sync"), \
                  patch("lead_scraper.time.sleep"), \
                  patch("builtins.print") as mock_print:

@@ -30,6 +30,15 @@ GITHUB_CSV_PATH = "output/leads.csv"
 
 SUPABASE_TABLE = "leads"
 
+# Defense in depth against the restore-failure overwrite bug (see restore()'s docstring): even if a
+# scrape somehow runs against a wrongly-empty local database, these two columns can never be blanked
+# out in Supabase by an incoming empty value -- only a genuinely non-empty call outcome overwrites a
+# previous one. rejected_at is deliberately NOT in this set: Undo has to be able to set it back to
+# "" within seconds of a Remove, and that's a legitimate blank that must reach Supabase -- the
+# primary defense for rejected_at is restore_if_empty() refusing to proceed on a failed restore in
+# the first place, not this backstop.
+NEVER_BLANK_COLUMNS = {"status", "notes"}
+
 last_backup_error = None  # most recent backup failure message; None once sync() succeeds cleanly
 
 
@@ -110,7 +119,13 @@ def push_supabase(local_path):
         return
     columns = list(rows[0].keys())
     quoted_columns = ", ".join(f'"{c}"' for c in columns)
-    update_clause = ", ".join(f'"{c}" = EXCLUDED."{c}"' for c in columns if c != "phone")
+
+    def set_clause(c):
+        if c in NEVER_BLANK_COLUMNS:
+            return f'"{c}" = CASE WHEN EXCLUDED."{c}" = \'\' THEN {SUPABASE_TABLE}."{c}" ELSE EXCLUDED."{c}" END'
+        return f'"{c}" = EXCLUDED."{c}"'
+
+    update_clause = ", ".join(set_clause(c) for c in columns if c != "phone")
     values = [tuple(row.get(c, "") for c in columns) for row in rows]
     try:
         with psycopg2.connect(conn_str, connect_timeout=10) as conn:
@@ -166,9 +181,29 @@ def sync(local_path):
 
 
 def restore(local_path):
-    """Recover the last backup onto a fresh host. Tries GitHub first, then Supabase, then gives up
-    quietly and leaves local_path as it is (an empty/missing file is normal on a first-ever run)."""
+    """Recover the last backup onto a fresh host. Supabase is tried first when it's configured --
+    that's where leads actually live now -- with GitHub only as a fallback, not preferred over it;
+    trying GitHub first used to mean a stale GitHub copy could win even with a fully current
+    Supabase available. GitHub is also tried as a fallback when Supabase errors (rather than simply
+    being empty), on the theory that a possibly-stale real backup beats no backup at all.
+
+    Returns the failure message if a *configured* backend actually errored while being consulted
+    (a connection failure, a bad query -- something going wrong), or None if nothing errored,
+    whether that's because a backend had real data, a backend is configured but legitimately empty
+    (a true first-ever run), or nothing is configured at all. This distinction is load-bearing: see
+    db.restore_if_empty, which must never treat an *error* as "genuinely nothing to restore" --
+    conflating the two is what let a scrape run against a wrongly-empty local database and then
+    push blank status/notes/rejected_at over real values in Supabase on the next backup."""
+    global last_backup_error
+    last_backup_error = None
+    supabase_error = None
+    if os.environ.get("SUPABASE_DB_URL"):
+        pull_supabase(local_path)
+        if local_path.exists() and local_path.stat().st_size > 0:
+            return None
+        supabase_error = last_backup_error
+    last_backup_error = None
     pull_github(local_path)
     if local_path.exists() and local_path.stat().st_size > 0:
-        return
-    pull_supabase(local_path)
+        return None
+    return supabase_error or last_backup_error

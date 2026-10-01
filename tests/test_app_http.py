@@ -47,6 +47,7 @@ class ServerTestCase(unittest.TestCase):
             app.job.update(proc=None, log=[], started=False, scope="", states=None, stopped=False)
         with app._auth_lock:
             app._auth_failures.clear()
+        app.restore_state["error"] = None
 
     def request(self, method, path, body=None, headers=None):
         conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
@@ -173,6 +174,32 @@ class RunEndpointTests(ServerTestCase):
         self.assertEqual(status, 400)
         self.assertIn("error", body)
 
+    def test_a_scrape_is_refused_while_a_restore_is_known_to_have_failed(self):
+        # Hit live: scraping into a database that's empty only because its restore failed re-inserts
+        # every lead fresh with blank status/notes/rejected_at, which the next backup then upserts
+        # straight over Supabase's real values. This must be refused outright, not just discouraged.
+        app.restore_state["error"] = "Supabase pull failed: timeout"
+        status, body = self.post_json("/api/run", {"states": ["CO"]})
+        self.assertEqual(status, 400)
+        self.assertIn("error", body)
+        self.assertFalse(app.is_running())
+
+
+class RestoreRetryEndpointTests(ServerTestCase):
+    def test_retry_clears_the_error_on_success(self):
+        app.restore_state["error"] = "Supabase pull failed: timeout"
+        with patch.object(db, "restore_if_empty", return_value=None):
+            status, body = self.post_json("/api/restore/retry", {})
+        self.assertEqual(status, 200)
+        self.assertTrue(body["ok"])
+        self.assertIsNone(app.restore_state["error"])
+
+    def test_retry_reports_a_continued_failure(self):
+        with patch.object(db, "restore_if_empty", return_value="Supabase pull failed: timeout"):
+            status, body = self.post_json("/api/restore/retry", {})
+        self.assertEqual(status, 400)
+        self.assertEqual(app.restore_state["error"], "Supabase pull failed: timeout")
+
 
 class StatusEndpointTests(ServerTestCase):
     def test_shape_when_idle(self):
@@ -183,6 +210,7 @@ class StatusEndpointTests(ServerTestCase):
         self.assertEqual(body["failedStates"], [])
         self.assertEqual(body["notReachedStates"], [])
         self.assertEqual(body["backupsPaused"], False)
+        self.assertIsNone(body["restoreError"])
 
 
 class BackupsPauseEndpointTests(ServerTestCase):

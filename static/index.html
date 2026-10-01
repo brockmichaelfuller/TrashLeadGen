@@ -108,11 +108,14 @@
 <header>
   <h1>TrashLeadGen</h1>
   <div class="sub">Residential trash-pickup companies across the U.S., from open map data. Free, no API key.</div>
+  <div class="backupWarn" id="restoreWarn" hidden>
+    ⚠ <span id="restoreWarnText"></span> <button type="button" class="link" id="retryRestore">Try again</button>
+  </div>
   <div class="backupWarn" id="backupWarn" hidden>
-    ⚠ Changes are saving on this server, but the backup to Google Sheets/GitHub is currently failing -- it'll keep retrying automatically. If the site restarts before it clears, the very latest edits could be lost.
+    ⚠ <span id="backupWarnText"></span> Don't redeploy or restart until this clears.
   </div>
   <div class="backupPaused" id="backupPausedNote" hidden>
-    <span>⏸ External backups (GitHub/Sheets) are paused -- nothing is being pushed. Changes still save on this server.</span>
+    <span>⏸ External backups are paused -- nothing is being pushed. Changes still save on this server.</span>
   </div>
   <button type="button" class="link backupToggle" id="backupToggle"></button>
 </header>
@@ -188,7 +191,7 @@
 
 <script>
 const $ = id => document.getElementById(id);
-let leads = [], sort = { k: null, dir: 1 }, wasRunning = false, seenSources = null;
+let leads = [], sort = { k: null, dir: 1 }, wasRunning = false, seenSources = null, restoreFailed = false;
 
 const api = (url, body) => fetch(url, body === undefined ? {} : {
   method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body)
@@ -402,7 +405,15 @@ function renderLeads() {
   $("statStates").textContent = new Set(leads.map(l => l.state).filter(Boolean)).size;
   $("statShown").textContent = shown.length;
   $("empty").hidden = leads.length > 0;
-  if (!leads.length) $("empty").textContent = "No leads yet. Click Run scrape to collect them.";
+  // An empty list because the restore failed must never read like a genuinely fresh install -- the
+  // real leads are one successful retry away, not gone. See the restoreWarn banner above for the
+  // actual error; this just makes sure "No leads yet" (which invites running a scrape -- exactly
+  // the action that would overwrite the real data once it's finally restored) never shows here.
+  if (!leads.length) {
+    $("empty").textContent = restoreFailed
+      ? "Couldn't load your saved leads yet. See the message above -- don't run a scrape until it's resolved."
+      : "No leads yet. Click Run scrape to collect them.";
+  }
   const states = [...new Set(leads.map(l => l.state).filter(Boolean))].sort();
   const cur = $("stateFilter").value;
   $("stateFilter").replaceChildren(new Option("All states", ""), ...states.map(s => new Option(s, s)));
@@ -486,13 +497,29 @@ async function poll() {
   $("retryFailed").textContent = `${verb} ${outstanding.length} ${noun} state${outstanding.length === 1 ? "" : "s"} (${outstanding.join(", ")})`;
   $("retryFailed").dataset.states = JSON.stringify(outstanding);
   // A save always succeeds locally first -- this is just letting the owner know the external
-  // backup (GitHub/Sheets) is currently failing, so a restart before it clears could lose the
-  // very latest edits. It keeps retrying in the background on its own; no action is needed here.
-  // Suppressed while paused -- a paused backup "failing" to push isn't news, it's the point.
+  // backup is currently failing, so a restart before it clears could lose the very latest edits.
+  // It keeps retrying in the background on its own, but a restart risks losing real data, so this
+  // says so plainly instead of implying it's fine to leave alone. Suppressed while paused -- a
+  // paused backup "failing" to push isn't news, it's the point. s.backupError already names the
+  // real backend ("Supabase push failed: …"), so this never has to guess or hardcode a name.
   $("backupWarn").hidden = !s.backupError || s.backupsPaused;
+  $("backupWarnText").textContent = s.backupError || "";
   $("backupPausedNote").hidden = !s.backupsPaused;
   $("backupToggle").textContent = s.backupsPaused ? "Resume external backups" : "Pause external backups";
   $("backupToggle").dataset.paused = s.backupsPaused ? "0" : "1";  // what clicking it should set next
+  // A failed restore at start-up is a different, much worse situation than an ordinary backup
+  // failure -- see db.restore_if_empty's docstring. The page must never show the "No leads yet"
+  // empty state here (renderLeads' empty-state branch checks restoreFailed for this), and Run
+  // scrape is refused server-side regardless of whether this banner is seen, but showing it is
+  // what tells the owner why. Re-render immediately on a change rather than waiting for whatever
+  // the normal loadLeads() cadence happens to be, since this message matters right away.
+  $("restoreWarn").hidden = !s.restoreError;
+  $("restoreWarnText").textContent = s.restoreError
+    ? `Couldn't load your saved leads (${s.restoreError}) -- don't run a scrape yet.` : "";
+  const wasRestoreFailed = restoreFailed;
+  restoreFailed = !!s.restoreError;
+  if (restoreFailed !== wasRestoreFailed) renderLeads();
+  $("run").disabled = s.running || !!s.restoreError;
   // Rebuilding the leads table wipes any text selection in it, which breaks copy/paste of a phone
   // number, note, etc. right in the middle of a scrape (when this refresh fires every 2s). Skip the
   // rebuild -- but keep updating progress above -- while the user has something selected; the next
@@ -570,6 +597,15 @@ $("run").onclick = async () => {
 $("stop").onclick = () => api("/api/stop", {}).then(poll);
 
 $("backupToggle").onclick = () => api("/api/backups", { paused: $("backupToggle").dataset.paused === "1" }).then(poll);
+
+$("retryRestore").onclick = async () => {
+  $("retryRestore").disabled = true;
+  try { await api("/api/restore/retry", {}); }
+  catch (e) { /* a non-200 here just means it's still failing -- poll() below shows the real reason */ }
+  await loadLeads();
+  await poll();
+  $("retryRestore").disabled = false;
+};
 
 $("retryFailed").onclick = async () => {
   $("err").textContent = "";

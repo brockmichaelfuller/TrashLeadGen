@@ -261,6 +261,44 @@ class IsEmptyTests(unittest.TestCase):
             self.assertFalse(db.is_empty(db_path))
 
 
+class RestoreIfEmptyTests(unittest.TestCase):
+    """Hit live: a failed restore used to be silently treated exactly like a genuinely-new,
+    never-used database -- the caller had no way to tell the difference, so it proceeded to scrape
+    and then backed up blank status/notes/rejected_at straight over Supabase's real values. These
+    prove restore_if_empty now hands that distinction up instead of swallowing it."""
+
+    def test_returns_the_error_and_does_not_import_anything_when_restore_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "leads.db"
+            with patch.object(db.sync_leads, "restore", return_value="Supabase pull failed: timeout"):
+                error = db.restore_if_empty(db_path)
+        self.assertEqual(error, "Supabase pull failed: timeout")
+        self.assertTrue(db.is_empty(db_path))  # must not have imported a half-restored CSV
+
+    def test_returns_none_and_imports_normally_when_restore_succeeds(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "leads.db"
+
+            def fake_restore(csv_path):
+                with csv_path.open("w", newline="") as f:
+                    f.write("company_name,phone\nA,111\n")
+                return None
+
+            with patch.object(db.sync_leads, "restore", side_effect=fake_restore):
+                error = db.restore_if_empty(db_path)
+            self.assertIsNone(error)
+            self.assertEqual(db.all_leads(db_path)[0]["phone"], "111")
+
+    def test_returns_none_without_calling_restore_when_already_non_empty(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "leads.db"
+            db.insert_if_new(db_path, {"phone": "111"})
+            with patch.object(db.sync_leads, "restore") as mock_restore:
+                error = db.restore_if_empty(db_path)
+        mock_restore.assert_not_called()
+        self.assertIsNone(error)
+
+
 class BackupsPausedTests(unittest.TestCase):
     def test_not_paused_by_default(self):
         with tempfile.TemporaryDirectory() as tmp:
