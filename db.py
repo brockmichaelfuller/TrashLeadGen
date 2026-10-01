@@ -236,11 +236,12 @@ def set_backups_paused(db_path, paused):
 
 
 def sync_backup(db_path):
-    """Export the database to its companion CSV and back that up -- sync_leads.py only ever speaks
-    CSV, so this is the bridge that lets the (already-tested) GitHub/Sheets logic stay untouched.
-    The local CSV export always happens (it's just a local file, and keeps it current for whenever
-    backups resume); the actual external push is skipped while paused. Returns the failure message
-    if the push failed just now, or None (also the case while paused, since that isn't a failure)."""
+    """Export the database to its companion CSV and back that up -- the companion CSV is the bridge
+    that lets the already-tested GitHub/Supabase logic in sync_leads.py stay untouched even though the
+    local store is SQLite now. The local CSV export always happens (it's just a local file, and keeps
+    it current for whenever backups resume); the actual external push is skipped while paused. Returns
+    the failure message if the push failed just now, or None (also the case while paused, since that
+    isn't a failure)."""
     csv_path = Path(db_path).with_suffix(".csv")
     export_to_csv(db_path, csv_path)
     if backups_paused(db_path):

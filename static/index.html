@@ -4,10 +4,12 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>TrashLeadGen</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%9A%9B%3C/text%3E%3C/svg%3E">
 <style>
   :root {
     --bg: #f6f7f5; --panel: #fff; --text: #1c2320; --muted: #66716b; --line: #dfe4e0;
     --accent: #1f7a4d; --accent-text: #fff; --danger: #b3261e; --row: #f0f3f0;
+    color-scheme: light dark; /* native controls (select, checkbox, scrollbar) match the OS theme below instead of always rendering light */
   }
   @media (prefers-color-scheme: dark) {
     :root { --bg: #121614; --panel: #1a201d; --text: #e6ebe8; --muted: #8b968f; --line: #2b332f;
@@ -23,7 +25,16 @@
      scrolling horizontally past Notes/Remove at widths where there was plenty of room to show them. */
   main { max-width: 1600px; margin: 0 auto; padding: 16px 24px 40px; display: grid; gap: 16px;
          grid-template-columns: 340px minmax(0, 1fr); align-items: start; }
-  @media (max-width: 860px) { main { grid-template-columns: minmax(0, 1fr); padding: 16px; } header { padding: 16px 16px 0; } }
+  @media (max-width: 860px) {
+    main { grid-template-columns: minmax(0, 1fr); padding: 16px; }
+    header { padding: 16px 16px 0; }
+    /* WCAG 2.5.5's 44px touch-target minimum -- removeBtn and the link-style buttons were sized for
+       a mouse cursor (as small as 4px 10px padding at 12px font) and hard to hit reliably by touch. */
+    button, a.btn-link, select { min-height: 44px; }
+    .removeBtn { min-height: 40px; padding: 8px 14px; font-size: 13px; }
+    .link { min-height: auto; }  /* inline text links (Try again, Retry, Undo) -- not a tap target of their own size */
+    .emailFilter { padding: 10px 0; }  /* the checkbox itself can't be resized; pad its label instead */
+  }
   .card { min-width: 0; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px; }
   .card h2 { margin: 0 0 12px; font-size: 13px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); }
   .stack { display: grid; grid-template-columns: minmax(0, 1fr); gap: 16px; min-width: 0; }
@@ -45,12 +56,8 @@
   .row { display: flex; gap: 8px; align-items: center; }
   .row > * { flex: 1; }
   .row > button { flex: none; }
-  .between { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
   .link { background: none; border: none; color: var(--accent); padding: 0; }
   .link:hover { background: none; text-decoration: underline; }
-  details summary { cursor: pointer; color: var(--muted); margin-top: 12px; }
-  .grid4 { display: grid; grid-template-columns: 1fr 70px; gap: 8px; margin-top: 8px; }
-  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin: 8px 0; }
   .bar { height: 8px; background: var(--row); border-radius: 4px; overflow: hidden; margin: 10px 0 8px; }
   .bar div { height: 100%; width: 0; background: var(--accent); transition: width .3s; }
   .bar div.warn { background: #c9862b; }
@@ -60,8 +67,13 @@
   .stats { display: flex; gap: 24px; margin-bottom: 12px; }
   .stat b { display: block; font-size: 22px; }
   .stat span { color: var(--muted); font-size: 12px; }
-  .tools { display: grid; grid-template-columns: 1fr 130px auto auto auto auto; gap: 8px; align-items: center; margin-bottom: 12px; }
-  @media (max-width: 560px) { .tools { grid-template-columns: 1fr 1fr; } }
+  /* flex-wrap instead of a fixed grid -- at common in-between widths (a browser window narrower than
+     a wide monitor but wider than the 560px phone breakpoint), the old grid's six fixed columns
+     squeezed the search box's "1fr" track down to a practically unusable ~20px instead of wrapping. */
+  .tools { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 12px; }
+  .tools input[type="search"] { flex: 1 1 200px; }
+  .tools select#stateFilter { flex: 0 1 130px; }
+  .tools .emailFilter, .tools button, .tools a.btn-link { flex: 0 0 auto; }
   .scroll { overflow-x: auto; }
   .emailFilter { display: flex; align-items: center; gap: 6px; white-space: nowrap; }
   tr.new td { animation: flash 2s ease-out; }
@@ -81,7 +93,10 @@
   .row-err.show { opacity: 1; }
   .row-err .link { font-size: 11px; font-weight: 600; }
   select.unsaved, input.unsaved { border-color: var(--danger); outline: 1px solid var(--danger); }
-  tr.excluded { opacity: .5; }
+  /* .5 measured at ~3.2:1 against the panel background -- below the 4.5:1 text-contrast minimum even
+     though the row is meant to stay readable (it's dimmed for emphasis, not hidden). .65 clears ~5:1
+     while still reading as visually de-emphasized next to a full-opacity row. */
+  tr.excluded { opacity: .65; }
   th { color: var(--muted); font-weight: 600; font-size: 12px; cursor: pointer; user-select: none; }
   th:hover { color: var(--text); }
   tbody tr:hover { background: var(--row); }
@@ -105,7 +120,6 @@
              clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
   th[data-k] { position: relative; }
   th[data-k]:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
-  th[data-k] .sortArrow { margin-left: 4px; color: var(--accent); }
 </style>
 </head>
 <body>
@@ -588,8 +602,17 @@ async function poll() {
     if (atEnd) log.scrollTop = log.scrollHeight;
   }
   $("retryFailed").hidden = s.running || !outstanding.length;
-  const verb = s.stopped ? "Continue" : "Retry", noun = s.stopped ? "remaining" : "failed";
-  $("retryFailed").textContent = `${verb} ${outstanding.length} ${noun} state${outstanding.length === 1 ? "" : "s"} (${outstanding.join(", ")})`;
+  {
+    const n = outstanding.length, plural = n === 1 ? "" : "s", list = outstanding.join(", ");
+    // An aborted-early run's "outstanding" states are mostly ones that were never even attempted
+    // (see run_aborted_early) -- calling all of them "failed", same as an ordinary per-state
+    // failure, overstated what actually happened to most of them.
+    let text;
+    if (s.stopped) text = `Continue ${n} remaining state${plural} (${list})`;
+    else if (s.abortedEarly) text = `Retry ${n} state${plural} not yet reached (${list})`;
+    else text = `Retry ${n} failed state${plural} (${list})`;
+    $("retryFailed").textContent = text;
+  }
   $("retryFailed").dataset.states = JSON.stringify(outstanding);
   // A save always succeeds locally first -- this is just letting the owner know the external
   // backup is currently failing, so a restart before it clears could lose the very latest edits.
@@ -650,7 +673,10 @@ async function copyText(text) {
   return false;
 }
 
-$("search").oninput = $("stateFilter").onchange = $("emailFilter").onchange = renderLeads;
+// Debounced so a full table rebuild doesn't fire on every single keystroke with a large lead list --
+// state/email filter changes are discrete clicks, not a fast keystroke stream, so those stay instant.
+$("search").oninput = debounce(renderLeads, 150);
+$("stateFilter").onchange = $("emailFilter").onchange = renderLeads;
 
 // Sortable headers: keyboard-operable (not just clickable), with aria-sort and a visible arrow on
 // whichever column is active, so the current sort is announced to screen readers and visible to

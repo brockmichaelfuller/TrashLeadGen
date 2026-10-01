@@ -281,6 +281,25 @@ class FriendlyErrorTests(unittest.TestCase):
         self.assertEqual(_friendly_error(Exception("something odd")), "the map data source had a temporary problem")
 
 
+class LogDebugDetailTests(unittest.TestCase):
+    def test_writes_the_real_traceback_even_outside_an_active_except_block(self):
+        # Hit live: _attempt_state catches its own exception and returns it as a value; by the time
+        # run()'s ordinary (non-except) control flow logs it, sys.exc_info() is already empty, and
+        # traceback.print_exc() -- which reads that, not the `error` argument -- wrote "NoneType:
+        # None" to debug.log instead of anything useful.
+        try:
+            raise ValueError("boom")
+        except ValueError as caught:
+            error = caught
+        with tempfile.TemporaryDirectory() as tmp:
+            output_path = Path(tmp) / "leads.db"
+            lead_scraper.log_debug_detail(output_path, "CO", error)
+            content = (Path(tmp) / "debug.log").read_text()
+        self.assertIn("ValueError: boom", content)
+        self.assertNotIn("NoneType: None", content)
+        self.assertIn("raise ValueError", content)  # the actual traceback line, not just the header
+
+
 class RunResilienceTests(unittest.TestCase):
     """Hit live: a failure past the network fetch (in this case, the backup sync step) crashed the
     whole run instead of just skipping that one state, because only fetch_elements() was wrapped in
@@ -337,6 +356,34 @@ class RunResilienceTests(unittest.TestCase):
                 run(db_path, ["CO"])
         printed = [c.args[0] for c in mock_print.call_args_list if c.args]
         self.assertIn("BACKUP_OK", printed)
+
+    def test_does_not_sleep_after_the_last_state_of_a_run(self):
+        # Hit live: the per-request delay used to run unconditionally after every state, including
+        # the very last one of the whole run -- pure wasted wall-clock time with no further request
+        # left to rate-limit against.
+        elements = {"CO": [{"type": "node", "id": 1, "tags": {"name": "Acme Waste", "phone": "303-343-7096"}}]}
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "leads.db"
+            with patch("lead_scraper.fetch_elements", side_effect=lambda state: elements[state]), \
+                 patch.object(db.sync_leads, "restore", return_value=None), \
+                 patch.object(db.sync_leads, "sync", return_value=None), \
+                 patch("lead_scraper.time.sleep") as mock_sleep:
+                run(db_path, ["CO"])
+        mock_sleep.assert_not_called()
+
+    def test_sleeps_between_states_but_not_after_the_last_one_in_a_round(self):
+        elements = {
+            "CO": [{"type": "node", "id": 1, "tags": {"name": "Acme Waste", "phone": "303-343-7096"}}],
+            "WY": [{"type": "node", "id": 2, "tags": {"name": "Rocky Mountain Waste", "phone": "307-555-0100"}}],
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "leads.db"
+            with patch("lead_scraper.fetch_elements", side_effect=lambda state: elements[state]), \
+                 patch.object(db.sync_leads, "restore", return_value=None), \
+                 patch.object(db.sync_leads, "sync", return_value=None), \
+                 patch("lead_scraper.time.sleep") as mock_sleep:
+                run(db_path, ["CO", "WY"])
+        mock_sleep.assert_called_once()  # between CO and WY, not after WY
 
     def test_a_state_that_fails_every_round_ends_up_in_the_final_failed_summary(self):
         with tempfile.TemporaryDirectory() as tmp:

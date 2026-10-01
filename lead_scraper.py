@@ -348,7 +348,12 @@ def log_debug_detail(output_path, state, error):
         with debug_path.open("a", encoding="utf-8") as f:
             f.write(f"\n--- {datetime.now().isoformat(timespec='seconds')} {state} ---\n")
             f.write(f"{type(error).__name__}: {error}\n")
-            traceback.print_exc(file=f)
+            # traceback.print_exc() reads the *currently handled* exception (sys.exc_info()), which
+            # is empty here for the call site inside run()'s normal control flow (the exception was
+            # already caught and returned by _attempt_state, not re-raised) -- that call used to write
+            # "NoneType: None" instead of a traceback. Formatting from `error.__traceback__` directly
+            # works regardless of whether we're still inside the `except` block that caught it.
+            traceback.print_exception(type(error), error, error.__traceback__, file=f)
     except OSError:
         pass  # debug logging must never itself break a run
 
@@ -453,7 +458,6 @@ def run(db_path, states):
                     log_debug_detail(db_path, state, error)  # the real exception, for /api/debug.log
                     still_failing.append(state)              # -- never shown in the user-facing log
                     consecutive_persistent = consecutive_persistent + 1 if message in PERSISTENT_ERROR_MESSAGES else 0
-                time.sleep(REQUEST_DELAY_SECONDS)
             except Exception as error:
                 # Same [i/n]-style prefix as the two branches above, so this line matches
                 # STATE_OUTCOME_RE too -- without it, a state failing here (the logging/sleep
@@ -478,6 +482,13 @@ def run(db_path, states):
                       f"stopping early instead of waiting on the rest ({verb} it). Check the connection "
                       "(or whatever's blocking it) and try again.", file=sys.stderr)
                 break
+            # No point waiting out the per-request delay after the last state of this round -- what
+            # comes next (the longer inter-round cooldown below, or the run simply ending) already
+            # separates it from any further request. Hit live: a state's *final* attempt (the last of
+            # the last round, with nothing left to rate-limit against) still paid this delay for
+            # nothing before the run printed its summary and exited.
+            if i < len(remaining) - 1:
+                time.sleep(REQUEST_DELAY_SECONDS)
         remaining = still_failing
         if abort_reason or not remaining or round_num == RETRY_ROUNDS:
             break

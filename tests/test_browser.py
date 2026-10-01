@@ -305,7 +305,8 @@ class RunStopRetryTests(BrowserTestCase):
         self.start_run(["BLOCKED1", "BLOCKED2", "CO", "WY"])
         expect(self.page.locator("#progressText")).to_contain_text("Stopped early", timeout=10000)
         expect(self.page.locator("#progressText")).to_contain_text("4 states left to retry")
-        expect(self.page.locator("#retryFailed")).to_have_text("Retry 4 failed states (BLOCKED1, BLOCKED2, CO, WY)")
+        # Not "failed states" -- CO and WY here were never even attempted, not states that failed.
+        expect(self.page.locator("#retryFailed")).to_have_text("Retry 4 states not yet reached (BLOCKED1, BLOCKED2, CO, WY)")
 
 
 class BackupPauseTests(BrowserTestCase):
