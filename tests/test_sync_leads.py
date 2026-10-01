@@ -171,6 +171,81 @@ class SupabaseEnabledTests(unittest.TestCase):
         self.assertEqual(values, [("Acme Waste", "(555) 123-4567")])
 
     @patch.dict("os.environ", {"SUPABASE_DB_URL": "postgresql://x"}, clear=True)
+    def test_the_upsert_is_guarded_by_updated_at_when_supabase_has_the_column(self):
+        # The scraper subprocess and the web app's debounced edit-push can back up at once (editing a
+        # lead mid-scrape is an ordinary use of the page) -- without this guard, whichever push's
+        # network request happens to land last always wins, even if it started first and carries
+        # older data. See push_supabase's docstring.
+        mock_psycopg2, mock_cur, mock_extras = _fake_psycopg2_module()
+        mock_cur.fetchone.return_value = (1,)  # information_schema check: the column exists
+        with patch.dict(sys.modules, {"psycopg2": mock_psycopg2, "psycopg2.extras": mock_extras}):
+            with tempfile.TemporaryDirectory() as tmp:
+                path = Path(tmp) / "leads.csv"
+                with path.open("w", newline="") as f:
+                    writer = csv.writer(f)
+                    writer.writerow(["phone", "company_name", "updated_at"])
+                    writer.writerow(["111", "Acme", "2026-09-30T12:00:00+00:00"])
+                sync_leads.push_supabase(path)
+        _, query, values = mock_extras.execute_values.call_args.args
+        self.assertIn('INSERT INTO leads ("phone", "company_name", "updated_at")', query)
+        self.assertIn('WHERE EXCLUDED."updated_at" >= leads."updated_at"', query)
+        self.assertEqual(values, [("111", "Acme", "2026-09-30T12:00:00+00:00")])
+
+    @patch.dict("os.environ", {"SUPABASE_DB_URL": "postgresql://x"}, clear=True)
+    def test_updated_at_is_dropped_from_the_push_when_supabase_does_not_have_the_column_yet(self):
+        # Adding the column is an optional, user-run migration (see README) -- a push must keep
+        # working exactly as it did before that migration, not start failing outright because the
+        # local CSV now has a column the live Supabase table doesn't have yet.
+        mock_psycopg2, mock_cur, mock_extras = _fake_psycopg2_module()
+        mock_cur.fetchone.return_value = None  # information_schema check: no such column
+        with patch.dict(sys.modules, {"psycopg2": mock_psycopg2, "psycopg2.extras": mock_extras}):
+            with tempfile.TemporaryDirectory() as tmp:
+                path = Path(tmp) / "leads.csv"
+                with path.open("w", newline="") as f:
+                    writer = csv.writer(f)
+                    writer.writerow(["phone", "company_name", "updated_at"])
+                    writer.writerow(["111", "Acme", "2026-09-30T12:00:00+00:00"])
+                sync_leads.push_supabase(path)
+        _, query, values = mock_extras.execute_values.call_args.args
+        self.assertNotIn("updated_at", query)
+        self.assertEqual(values, [("111", "Acme")])
+
+    @patch.dict("os.environ", {"SUPABASE_DB_URL": "postgresql://x"}, clear=True)
+    def test_an_older_snapshot_pushed_after_a_newer_one_does_not_win(self):
+        # Simulates the real race the WHERE guard defends against: an older push's network request
+        # (e.g. a retry) completing after a newer one already landed must not roll the row back.
+        table = {}
+
+        def fake_execute_values(cur, query, values):
+            for row in values:
+                phone, company_name, updated_at = row
+                existing = table.get(phone)
+                if existing is None or updated_at >= existing["updated_at"]:
+                    table[phone] = {"company_name": company_name, "updated_at": updated_at}
+
+        mock_psycopg2, mock_cur, mock_extras = _fake_psycopg2_module()
+        mock_cur.fetchone.return_value = (1,)
+        mock_extras.execute_values.side_effect = fake_execute_values
+        with patch.dict(sys.modules, {"psycopg2": mock_psycopg2, "psycopg2.extras": mock_extras}):
+            with tempfile.TemporaryDirectory() as tmp:
+                # The newer push (a status edit) lands first.
+                newer = Path(tmp) / "newer.csv"
+                with newer.open("w", newline="") as f:
+                    writer = csv.writer(f)
+                    writer.writerow(["phone", "company_name", "updated_at"])
+                    writer.writerow(["111", "Interested", "2026-09-30T12:00:05+00:00"])
+                sync_leads.push_supabase(newer)
+
+                # The older push (an in-flight retry of a stale snapshot) lands after it.
+                older = Path(tmp) / "older.csv"
+                with older.open("w", newline="") as f:
+                    writer = csv.writer(f)
+                    writer.writerow(["phone", "company_name", "updated_at"])
+                    writer.writerow(["111", "", "2026-09-30T12:00:00+00:00"])
+                sync_leads.push_supabase(older)
+        self.assertEqual(table["111"]["company_name"], "Interested")  # the newer value survives
+
+    @patch.dict("os.environ", {"SUPABASE_DB_URL": "postgresql://x"}, clear=True)
     def test_status_and_notes_use_a_never_blank_update_clause_but_other_columns_do_not(self):
         # Defense in depth against the restore-failure overwrite bug: even if a scrape somehow runs
         # against a wrongly-empty local database, an incoming blank status/notes must never erase a

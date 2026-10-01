@@ -32,7 +32,7 @@ A few things worth knowing about the page itself:
 - **Scope.** "Entire U.S." runs all 50 states + DC in one subprocess; the four "Group" options split that into smaller chunks (useful on a host that can't finish the whole country in one sitting, like Render's free plan).
 - **Stop and Retry.** Stop ends the run cleanly (reported as "Stopped," not an error) and offers to continue with whatever states weren't reached. If some states fail outright (or the map data source is unreachable and the run gives up on it early — see below), a Retry button appears for just those.
 - **One list.** Every lead with a name and phone (everything actually needed to call) is on the page. Email, when OpenStreetMap has it, is a column and an optional "Has email" filter -- not a separate tab -- so Copy phones/emails and Download CSV always cover everyone, not just whichever view happens to be open.
-- **A backup warning banner** appears if the last save to GitHub/Supabase failed (see below) — it keeps retrying in the background on its own; the banner is just so a stuck backup isn't silent.
+- **A backup warning banner** appears if the last save to GitHub/Supabase failed (see below) — it keeps retrying in the background on its own; the banner is just so a stuck backup isn't silent. Next to the pause/resume button, the page also always shows how long ago the last backup actually succeeded, so "no news" (nothing failing) can be told apart from "nothing has succeeded in a worryingly long time."
 - **`/api/debug.log`** has the raw exception + traceback behind whatever plain-language message the page shows for a failed state — useful for diagnosing a *recurring* failure; not meant for the owner.
 
 ## Running the scraper directly (no web page)
@@ -66,7 +66,7 @@ Leads live in a SQLite database (`db.py`), with `phone` as the primary key -- th
 - **Website check.** A candidate that clears the name filters and has a website gets that site's own text checked (free, no AI/API cost) for language distinguishing a normal residential route ("weekly curbside," "residential pickup") from a dumpster-rental, junk-removal, or portable-toilet business ("dumpster rental," "junk removal," "porta potty rental") — this is what catches a company like "Horizon Disposal Services," whose name gives no hint it's actually a dumpster-rental business. A site that mentions both (common — plenty of real haulers also rent dumpsters) is kept; an unreachable site or one with neither signal is kept unverified rather than dropped, so a network hiccup never costs a real lead. It's still a heuristic, not a guarantee — review the list before outreach, and extend `DISQUALIFYING_SERVICE_PHRASES`/`QUALIFYING_SERVICE_PHRASES` (or `KNOWN_BRANDS`/`EXCLUDE_NAME`) as gaps turn up. This check adds real time to a scrape (a few new-candidate websites are fetched concurrently at a time, ~10s timeout each, rather than one at a time).
 - **`status` and `notes`** start blank and aren't set by the scraper. Once Thomas has reviewed the list and outreach begins, use the "Interested?" dropdown and Notes field on each row (right next to the phone number) to record the outcome of a call — they save as you type, each field saves independently so two people editing the same lead at once can't clobber each other's work, and both columns are included in the CSV export.
 - **"Not interested" and "Do not contact"** leads stay visible in the table (for the record) but are automatically left out of Copy phones, Copy emails, and Download CSV.
-- **Deleting a lead is permanent.** The Remove button on each row (confirms first, and offers Undo for a few seconds after) doesn't just drop the row — it's kept with a `rejected_at` date so its phone stays in the database forever, which is what stops a later scrape from seeing it as new and adding it right back. A rejected row is hidden everywhere else (the site, exports, the Google Sheet), it just isn't gone from the database.
+- **Deleting a lead is permanent.** The Remove button on each row (confirms first, and offers Undo for a few seconds after) doesn't just drop the row — it's kept with a `rejected_at` date so its phone stays in the database forever, which is what stops a later scrape from seeing it as new and adding it right back. A rejected row is hidden everywhere else (the site, exports, the GitHub/Supabase backup), it just isn't gone from the database.
 
 ## Making data permanent on Render
 
@@ -89,11 +89,18 @@ Render's free plan has no persistent disk: every redeploy, and every time the se
     date_collected text not null default '',
     status text not null default '',
     notes text not null default '',
-    rejected_at text not null default ''
+    rejected_at text not null default '',
+    updated_at text not null default ''
   );
   ```
 
   A free Supabase project pauses itself after about a week with no activity (a scrape or an edit counts, so an actively-used app won't trigger this) — a paused project is resumed from the Supabase dashboard with one click, and nothing is lost while paused, it just won't back up until you resume it.
+
+  **`updated_at`** guards against a scrape's backup and an edit's backup landing out of order (editing a lead while a scrape is running is an ordinary, expected use of the page) — a push only overwrites a row in Supabase if its own `updated_at` is at least as new as what's already there, so a slow or retried push with older data can't roll back a newer edit that already landed. It's optional: `push_supabase` checks whether the column exists and falls back to the old unconditional upsert if it doesn't, so nothing breaks on a table created before this was added. If your table predates this column, add it once with:
+
+  ```sql
+  alter table leads add column updated_at text not null default '';
+  ```
 
 Both GitHub and Supabase can be set at once — on startup the app tries GitHub first and falls back to Supabase if GitHub has nothing (so either one alone is enough to survive a restart, into a brand new database). Neither is required for local use.
 

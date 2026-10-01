@@ -99,12 +99,29 @@ def push_github(local_path):
         _warn("GitHub push", error)
 
 
+def _supabase_has_column(cur, column):
+    cur.execute(
+        "SELECT 1 FROM information_schema.columns WHERE table_name = %s AND column_name = %s",
+        (SUPABASE_TABLE, column))
+    return cur.fetchone() is not None
+
+
 def push_supabase(local_path):
     """Upsert every row in local_path (keyed on phone) into the Supabase `leads` table. A plain
     INSERT ... ON CONFLICT DO UPDATE, unlike Sheets' old clear-then-write-the-whole-sheet approach --
     each row lands or updates independently, so there's no window where a failure mid-push could
     ever leave the table holding less than it already had. Never deletes a row Supabase already
-    has, so a row briefly missing from local_path just wouldn't get touched, not erased."""
+    has, so a row briefly missing from local_path just wouldn't get touched, not erased.
+
+    The scraper subprocess and the web app's debounced edit-push can both back up at once (editing a
+    lead while a scrape is running is an ordinary, expected use of the page), and the two pushes can
+    reach Supabase out of order -- an older snapshot's network request finishing after a newer one's
+    (e.g. on a retry) would otherwise overwrite the newer values with stale ones, since each push just
+    upserts its own full snapshot with no idea whether something newer already landed. When the
+    `updated_at` column is present, the upsert only takes effect if the incoming row is at least as
+    new as what's already there, guarding against exactly that. Falls back to the old unconditional
+    upsert (no guard) when the column isn't there yet -- see README's "Making data permanent on
+    Render" for the one-time `ALTER TABLE` to add it."""
     conn_str = os.environ.get("SUPABASE_DB_URL")
     if not conn_str or not local_path.exists():
         return
@@ -118,23 +135,27 @@ def push_supabase(local_path):
     except ImportError as error:
         _warn("Supabase push", error)
         return
-    columns = list(rows[0].keys())
-    quoted_columns = ", ".join(f'"{c}"' for c in columns)
+    all_columns = list(rows[0].keys())
 
     def set_clause(c):
         if c in NEVER_BLANK_COLUMNS:
             return f'"{c}" = CASE WHEN EXCLUDED."{c}" = \'\' THEN {SUPABASE_TABLE}."{c}" ELSE EXCLUDED."{c}" END'
         return f'"{c}" = EXCLUDED."{c}"'
 
-    update_clause = ", ".join(set_clause(c) for c in columns if c != "phone")
-    values = [tuple(row.get(c, "") for c in columns) for row in rows]
     try:
         with psycopg2.connect(conn_str, connect_timeout=10) as conn:
             with conn.cursor() as cur:
+                has_updated_at = "updated_at" in all_columns and _supabase_has_column(cur, "updated_at")
+                columns = all_columns if has_updated_at else [c for c in all_columns if c != "updated_at"]
+                quoted_columns = ", ".join(f'"{c}"' for c in columns)
+                update_clause = ", ".join(set_clause(c) for c in columns if c != "phone")
+                where_clause = (f' WHERE EXCLUDED."updated_at" >= {SUPABASE_TABLE}."updated_at"'
+                                if has_updated_at else "")
+                values = [tuple(row.get(c, "") for c in columns) for row in rows]
                 execute_values(
                     cur,
                     f'INSERT INTO {SUPABASE_TABLE} ({quoted_columns}) VALUES %s '
-                    f'ON CONFLICT (phone) DO UPDATE SET {update_clause}',
+                    f'ON CONFLICT (phone) DO UPDATE SET {update_clause}{where_clause}',
                     values,
                 )
     except psycopg2.Error as error:

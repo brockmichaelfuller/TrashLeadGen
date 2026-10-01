@@ -36,7 +36,16 @@ class InsertIfNewTests(unittest.TestCase):
             db.insert_if_new(db_path, {"phone": "111"})
             lead = db.all_leads(db_path)[0]
             for col in db.COLUMNS:
-                self.assertEqual(lead[col], "" if col != "phone" else "111")
+                if col in ("phone", "updated_at"):
+                    continue
+                self.assertEqual(lead[col], "")
+            self.assertEqual(lead["phone"], "111")
+
+    def test_insert_stamps_updated_at(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "leads.db"
+            db.insert_if_new(db_path, {"phone": "111"})
+            self.assertTrue(db.all_leads(db_path)[0]["updated_at"])
 
 
 class ExistingPhonesTests(unittest.TestCase):
@@ -74,6 +83,18 @@ class UpdateFieldsTests(unittest.TestCase):
             db_path = Path(tmp) / "leads.db"
             db.insert_if_new(db_path, {"phone": "111"})
             self.assertFalse(db.update_fields(db_path, "111", {}))
+
+    def test_updating_a_field_stamps_updated_at(self):
+        # sync_leads.push_supabase uses this to tell a later edit apart from an older, in-flight
+        # snapshot of the same row (see its docstring) -- a stale updated_at would defeat that.
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "leads.db"
+            db.insert_if_new(db_path, {"phone": "111"})
+            before = db.all_leads(db_path)[0]["updated_at"]
+            db.update_fields(db_path, "111", {"status": "Interested"})
+            after = db.all_leads(db_path)[0]["updated_at"]
+            self.assertNotEqual(before, after)
+            self.assertGreater(after, before)
 
 
 class RejectionTests(unittest.TestCase):
@@ -171,6 +192,9 @@ class CsvBridgeTests(unittest.TestCase):
             row = {c: f"val-{c}" for c in db.COLUMNS}
             row["phone"] = "111"
             db.insert_if_new(db_path, row)
+            # insert_if_new stamps a real updated_at regardless of what's passed in (see its
+            # docstring) -- round-trip against what actually landed, not the synthetic input value.
+            row["updated_at"] = db.all_leads(db_path, include_rejected=True)[0]["updated_at"]
             db.export_to_csv(db_path, csv_path)
 
             new_db_path = Path(tmp) / "restored.db"

@@ -6,7 +6,7 @@ the scraper subprocess and the web app: SQLite's own WAL journal mode plus a bus
 transactional concurrency for free. Every function here opens and closes its own short-lived
 connection, which is what makes this safe to call from any thread or process without extra care.
 
-GitHub/Google Sheets backup (sync_leads.py) is untouched and still speaks CSV -- export_to_csv/
+GitHub/Supabase backup (sync_leads.py) is untouched and still speaks CSV -- export_to_csv/
 import_from_csv are the bridge at that boundary, so the already-tested backup/restore logic never
 has to know the local store changed.
 """
@@ -15,7 +15,7 @@ import json
 import os
 import sqlite3
 import threading
-from datetime import date
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 import sync_leads
@@ -23,7 +23,11 @@ import sync_leads
 AUDIT_LOG_PATH = Path(__file__).parent / "audit_log.json"
 
 COLUMNS = ["company_name", "phone", "email", "website", "address", "city", "state", "timezone",
-           "source", "date_collected", "status", "notes", "rejected_at"]
+           "source", "date_collected", "status", "notes", "rejected_at", "updated_at"]
+
+
+def _now_iso():
+    return datetime.now(timezone.utc).isoformat()
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS leads (
@@ -39,7 +43,8 @@ CREATE TABLE IF NOT EXISTS leads (
     date_collected TEXT NOT NULL DEFAULT '',
     status TEXT NOT NULL DEFAULT '',
     notes TEXT NOT NULL DEFAULT '',
-    rejected_at TEXT NOT NULL DEFAULT ''
+    rejected_at TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL DEFAULT ''
 )
 """
 
@@ -57,6 +62,13 @@ def connect(db_path):
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA busy_timeout=10000")
     conn.execute(_SCHEMA)
+    try:
+        # A local database created before updated_at existed (Render itself never has one of these --
+        # no persistent disk means every boot starts from CREATE TABLE IF NOT EXISTS above -- but a
+        # long-lived local dev database might) just gets the column added on next connect.
+        conn.execute("ALTER TABLE leads ADD COLUMN updated_at TEXT NOT NULL DEFAULT ''")
+    except sqlite3.OperationalError:
+        pass
     return conn
 
 
@@ -83,6 +95,7 @@ def insert_if_new(db_path, row):
     the primary key constraint is what actually guarantees no duplicate ever lands, even if two
     writers raced to insert the same phone at once."""
     values = {c: (row.get(c) or "") for c in COLUMNS}
+    values["updated_at"] = _now_iso()
     with connect(db_path) as conn:
         cur = conn.execute(f"INSERT OR IGNORE INTO leads ({_INSERT_COLUMNS}) VALUES ({_INSERT_PLACEHOLDERS})", values)
         conn.commit()
@@ -90,9 +103,12 @@ def insert_if_new(db_path, row):
 
 
 def update_fields(db_path, phone, updates):
-    """Set arbitrary fields on the row with this phone. Returns False if the phone isn't found."""
+    """Set arbitrary fields on the row with this phone, stamping updated_at so push_supabase can tell
+    this change apart from an older, now-stale snapshot still in flight (see sync_leads.push_supabase).
+    Returns False if the phone isn't found."""
     if not updates:
         return False
+    updates = {**updates, "updated_at": _now_iso()}
     with connect(db_path) as conn:
         if conn.execute("SELECT 1 FROM leads WHERE phone = ?", (phone,)).fetchone() is None:
             return False
@@ -118,12 +134,14 @@ def reject_phones(db_path, entries):
     if not entries:
         return
     today = date.today().isoformat()
+    now = _now_iso()
     with connect(db_path) as conn:
         for phone, company_name in entries.items():
             conn.execute(
-                "INSERT INTO leads (phone, company_name, rejected_at) VALUES (?, ?, ?) "
-                "ON CONFLICT(phone) DO UPDATE SET rejected_at = excluded.rejected_at WHERE rejected_at = ''",
-                (phone, company_name, today))
+                "INSERT INTO leads (phone, company_name, rejected_at, updated_at) VALUES (?, ?, ?, ?) "
+                "ON CONFLICT(phone) DO UPDATE SET rejected_at = excluded.rejected_at, updated_at = excluded.updated_at "
+                "WHERE rejected_at = ''",
+                (phone, company_name, today, now))
         conn.commit()
 
 
