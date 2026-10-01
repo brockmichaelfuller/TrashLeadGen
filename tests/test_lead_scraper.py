@@ -20,6 +20,14 @@ class NormalizePhoneTests(unittest.TestCase):
     def test_takes_first_valid_of_multiple(self):
         self.assertEqual(normalize_phone("n/a; 303-343-7096"), "(303) 343-7096")
 
+    def test_a_trailing_extension_is_dropped_instead_of_invalidating_the_number(self):
+        # Hit live: "ext. 12"'s digits used to get appended to the main number, pushing it to 12
+        # digits and silently dropping an otherwise-normal lead that happened to list an extension.
+        self.assertEqual(normalize_phone("303-343-7096 ext. 12"), "(303) 343-7096")
+        self.assertEqual(normalize_phone("(303) 343-7096 extension 100"), "(303) 343-7096")
+        self.assertEqual(normalize_phone("303-343-7096x5"), "(303) 343-7096")
+        self.assertEqual(normalize_phone("303-343-7096 x 5"), "(303) 343-7096")
+
     def test_rejects_invalid(self):
         self.assertIsNone(normalize_phone("123-4567"))
         self.assertIsNone(normalize_phone("000-000-0000"))

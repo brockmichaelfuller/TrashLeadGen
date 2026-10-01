@@ -206,6 +206,7 @@ class PumpOutputTests(unittest.TestCase):
 
     def tearDown(self):
         app.backup_state["error"] = None
+        app.backup_state["lastSuccessAt"] = None
         app.job["log"] = []
 
     def test_a_backup_error_marker_sets_backup_state_and_is_not_logged(self):
@@ -215,10 +216,11 @@ class PumpOutputTests(unittest.TestCase):
         self.assertEqual(app.backup_state["error"], "GitHub push failed: HTTP 409")
         self.assertEqual(app.job["log"], ["[1/1] CO: 0 new companies"])
 
-    def test_a_later_backup_ok_marker_clears_a_prior_error(self):
+    def test_a_later_backup_ok_marker_clears_a_prior_error_and_records_when(self):
         proc = SimpleNamespace(stdout=["BACKUP_ERROR: boom\n", "BACKUP_OK\n"], wait=lambda: None)
         app.pump_output(proc)
         self.assertIsNone(app.backup_state["error"])
+        self.assertIsNotNone(app.backup_state["lastSuccessAt"])
         self.assertEqual(app.job["log"], [])
 
 
@@ -232,18 +234,21 @@ class BackupSchedulingTests(unittest.TestCase):
                 app._sync_timer.cancel()
                 app._sync_timer = None
         app.backup_state["error"] = None
+        app.backup_state["lastSuccessAt"] = None
 
     @patch("app.db.sync_backup", return_value=None)
-    def test_a_successful_sync_clears_any_previous_error(self, mock_sync):
+    def test_a_successful_sync_clears_any_previous_error_and_records_when(self, mock_sync):
         app.backup_state["error"] = "old failure"
         app._run_sync()
         self.assertIsNone(app.backup_state["error"])
+        self.assertIsNotNone(app.backup_state["lastSuccessAt"])
         mock_sync.assert_called_once_with(app.DB_PATH)
 
-    @patch("app.db.sync_backup", return_value="Google Sheets push failed: HTTP 500")
+    @patch("app.db.sync_backup", return_value="Supabase push failed: HTTP 500")
     def test_a_failed_sync_is_recorded_and_schedules_a_retry(self, mock_sync):
         app._run_sync()
-        self.assertEqual(app.backup_state["error"], "Google Sheets push failed: HTTP 500")
+        self.assertEqual(app.backup_state["error"], "Supabase push failed: HTTP 500")
+        self.assertIsNone(app.backup_state["lastSuccessAt"])
         with app.lock:
             self.assertIsNotNone(app._sync_timer)
 

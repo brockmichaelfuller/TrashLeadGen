@@ -123,6 +123,37 @@ class UpdateLeadEndpointTests(ServerTestCase):
         status, body = self.post_json("/api/lead", {"phone": "999", "notes": "hi"})
         self.assertEqual(status, 404)
 
+    def test_the_invalid_status_error_is_plain_english_not_a_python_repr(self):
+        # Hit live: this used to read "status must be one of ['', 'Do not contact', ...]" -- a
+        # Python list repr (quotes, brackets) leaking straight into a message an end user sees.
+        status, body = self.post_json("/api/lead", {"phone": "111", "status": "maybe"})
+        self.assertEqual(status, 400)
+        self.assertNotIn("[", body["error"])
+        self.assertIn("Interested", body["error"])
+        self.assertIn("(none)", body["error"])
+
+    def test_a_non_string_phone_is_rejected_cleanly_instead_of_crashing(self):
+        # Hit live: data.get("phone") on a malformed request can be any JSON type -- a bare
+        # `.strip()` on a non-string crashed the request instead of returning a 400.
+        status, body = self.post_json("/api/lead", {"phone": 111, "status": "Interested"})
+        self.assertEqual(status, 400)
+        self.assertIn("error", body)
+
+    def test_a_non_string_status_is_rejected(self):
+        status, body = self.post_json("/api/lead", {"phone": "111", "status": 1})
+        self.assertEqual(status, 400)
+
+    def test_notes_over_the_length_limit_is_rejected(self):
+        status, body = self.post_json("/api/lead", {"phone": "111", "notes": "x" * (app.MAX_NOTES_LENGTH + 1)})
+        self.assertEqual(status, 400)
+        _, leads = self.get_json("/api/leads")
+        self.assertEqual(next(l for l in leads if l["phone"] == "111")["notes"], "")
+
+    def test_a_json_array_body_is_rejected_cleanly_instead_of_crashing(self):
+        status, body = self.post_json("/api/lead", ["not", "an", "object"])
+        self.assertEqual(status, 400)
+        self.assertIn("error", body)
+
 
 class DeleteUndeleteEndpointTests(ServerTestCase):
     def test_delete_then_undelete_round_trip(self):
@@ -174,6 +205,14 @@ class RunEndpointTests(ServerTestCase):
         self.assertEqual(status, 400)
         self.assertIn("error", body)
 
+    def test_states_sent_as_a_single_string_is_rejected_instead_of_scraping_one_letter_per_state(self):
+        # Hit live: a string is iterable in Python -- unguarded, {"states": "CO"} would silently
+        # become the four single-letter "states" C, O (plus whatever junk fell out of upper-casing
+        # them), instead of a clear error.
+        status, body = self.post_json("/api/run", {"states": "CO"})
+        self.assertEqual(status, 400)
+        self.assertFalse(app.is_running())
+
     def test_a_scrape_is_refused_while_a_restore_is_known_to_have_failed(self):
         # Hit live: scraping into a database that's empty only because its restore failed re-inserts
         # every lead fresh with blank status/notes/rejected_at, which the next backup then upserts
@@ -211,6 +250,7 @@ class StatusEndpointTests(ServerTestCase):
         self.assertEqual(body["notReachedStates"], [])
         self.assertEqual(body["backupsPaused"], False)
         self.assertIsNone(body["restoreError"])
+        self.assertIn("backupLastSuccessAt", body)
 
 
 class BackupsPauseEndpointTests(ServerTestCase):

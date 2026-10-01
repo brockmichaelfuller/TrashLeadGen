@@ -17,7 +17,7 @@ import subprocess
 import sys
 import threading
 import time
-from datetime import date
+from datetime import date, datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
@@ -45,8 +45,15 @@ job = {"proc": None, "log": [], "started": False, "scope": "", "states": None, "
 # /api/status instead of only ever going to stderr.
 SYNC_DEBOUNCE_SECONDS = 5
 SYNC_RETRY_SECONDS = 30
-backup_state = {"error": None}
+# lastSuccessAt: when a backup last actually landed -- there was previously no way to tell "backups
+# are fine, just quiet" from "the last one failed a while ago and the error already got missed",
+# short of an error banner that only ever shows up during a failure.
+backup_state = {"error": None, "lastSuccessAt": None}
 _sync_timer = None
+
+
+def _now_iso():
+    return datetime.now(timezone.utc).isoformat()
 
 # Set once at startup (and again on a manual retry) if the one-time restore of a fresh/empty
 # database failed -- see db.restore_if_empty's docstring for why a failed restore must never be
@@ -69,6 +76,8 @@ def _run_sync():
     error = db.sync_backup(DB_PATH)
     with lock:
         backup_state["error"] = error
+        if not error:
+            backup_state["lastSuccessAt"] = _now_iso()
         _sync_timer = None
     if error:
         _schedule_sync(SYNC_RETRY_SECONDS)
@@ -128,6 +137,18 @@ DO_NOT_EXPORT_STATUSES = {"Not interested", "Do not contact"}
 
 # The only values the "Interested?" dropdown offers.
 VALID_STATUSES = {"", "Interested", "Not interested", "Do not contact"}
+MAX_NOTES_LENGTH = 2000
+
+
+def _required_str(data, key):
+    """The stripped string for `key`, or None if it's missing, blank, or not a string -- so a
+    malformed request (e.g. a phone number sent as a JSON number) gets the same clean "required"
+    error as an actually-missing field, instead of an AttributeError crashing the request."""
+    value = data.get(key)
+    if not isinstance(value, str):
+        return None
+    value = value.strip()
+    return value or None
 
 
 def export_csv(db_path):
@@ -163,6 +184,7 @@ def pump_output(proc):
         if line == "BACKUP_OK":
             with lock:
                 backup_state["error"] = None
+                backup_state["lastSuccessAt"] = _now_iso()
             continue
         with lock:
             job["log"].append(line)
@@ -371,11 +393,17 @@ class Handler(BaseHTTPRequestHandler):
         self.send_body(json.dumps(data).encode(), "application/json", status)
 
     def read_json(self):
+        """The parsed JSON body, or {} for anything that isn't a usable JSON object -- malformed
+        JSON, or valid JSON that's a list/string/number instead. Every endpoint below calls
+        `data.get(...)`, which would raise (and crash the request with no useful response) on
+        anything that isn't a dict; returning {} instead just makes that read "field missing",
+        which the endpoint's own required-field check below already turns into a clean 400."""
         length = int(self.headers.get("Content-Length") or 0)
         try:
-            return json.loads(self.rfile.read(length) or b"{}")
+            data = json.loads(self.rfile.read(length) or b"{}")
         except ValueError:
             return {}
+        return data if isinstance(data, dict) else {}
 
     def do_GET(self):
         if not self.require_auth():
@@ -404,6 +432,7 @@ class Handler(BaseHTTPRequestHandler):
                             "finishedCount": len(finished),
                             "plannedCount": len(planned) if planned else None,
                             "backupError": backup_state["error"],
+                            "backupLastSuccessAt": backup_state["lastSuccessAt"],
                             "backupsPaused": db.backups_paused(DB_PATH),
                             "restoreError": restore_state["error"]})
         elif path == "/api/groups":
@@ -426,7 +455,13 @@ class Handler(BaseHTTPRequestHandler):
         path = self.path.split("?")[0]
         data = self.read_json()
         if path == "/api/run":
-            error = start_run(data.get("group", "all"), data.get("states"))
+            states = data.get("states")
+            if states is not None and not (isinstance(states, list) and all(isinstance(s, str) for s in states)):
+                return self.send_json({"error": "states must be a list of state codes"}, 400)
+            group = data.get("group", "all")
+            if not isinstance(group, str):
+                return self.send_json({"error": "group must be a string"}, 400)
+            error = start_run(group, states)
             return self.send_json({"error": error}, 400) if error else self.send_json({"ok": True})
         if path == "/api/stop":
             with lock:
@@ -442,19 +477,31 @@ class Handler(BaseHTTPRequestHandler):
                 error = attempt_restore()
             return self.send_json({"error": error}, 400) if error else self.send_json({"ok": True})
         if path == "/api/lead":
-            phone = (data.get("phone") or "").strip()
-            updates = {k: data.get(k, "") for k in ("status", "notes") if k in data}
-            if not phone or not updates:
-                return self.send_json({"error": "phone and at least one of status/notes are required"}, 400)
+            phone = _required_str(data, "phone")
+            if not phone:
+                return self.send_json({"error": "phone is required"}, 400)
+            if "status" not in data and "notes" not in data:
+                return self.send_json({"error": "at least one of status/notes is required"}, 400)
+            updates = {}
+            for k in ("status", "notes"):
+                if k not in data:
+                    continue
+                v = data[k]
+                if not isinstance(v, str):
+                    return self.send_json({"error": f"{k} must be a string"}, 400)
+                updates[k] = v
+            if "notes" in updates and len(updates["notes"]) > MAX_NOTES_LENGTH:
+                return self.send_json({"error": f"notes must be {MAX_NOTES_LENGTH} characters or fewer"}, 400)
             if "status" in updates and updates["status"] not in VALID_STATUSES:
-                return self.send_json({"error": f"status must be one of {sorted(VALID_STATUSES)}"}, 400)
+                options = ", ".join(s or "(none)" for s in sorted(VALID_STATUSES))
+                return self.send_json({"error": f"status must be one of: {options}"}, 400)
             with lock:
                 ok = update_lead(DB_PATH, phone, updates)
             if ok:
                 schedule_sync()
             return self.send_json({"ok": True}) if ok else self.send_json({"error": "Lead not found"}, 404)
         if path == "/api/lead/delete":
-            phone = (data.get("phone") or "").strip()
+            phone = _required_str(data, "phone")
             if not phone:
                 return self.send_json({"error": "phone is required"}, 400)
             with lock:
@@ -463,7 +510,7 @@ class Handler(BaseHTTPRequestHandler):
                 schedule_sync()
             return self.send_json({"ok": True}) if ok else self.send_json({"error": "Lead not found"}, 404)
         if path == "/api/lead/undelete":
-            phone = (data.get("phone") or "").strip()
+            phone = _required_str(data, "phone")
             if not phone:
                 return self.send_json({"error": "phone is required"}, 400)
             with lock:

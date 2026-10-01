@@ -14,3 +14,9 @@ services:
         sync: false # comma-separated, set in the Render dashboard
       - key: APP_PASSWORD
         sync: false # set this in the Render dashboard, never in git
+      - key: SUPABASE_DB_URL
+        sync: false # Postgres connection string -- set this in the Render dashboard, never in git
+      - key: GITHUB_TOKEN
+        sync: false # optional fallback backup -- set this in the Render dashboard, never in git
+      - key: GITHUB_REPO
+        sync: false # optional fallback backup, "owner/name" -- only needed alongside GITHUB_TOKEN

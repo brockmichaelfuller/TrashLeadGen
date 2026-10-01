@@ -122,17 +122,28 @@ class LeadsTableTests(BrowserTestCase):
         self.assertIn("111", csv_text)
         self.assertIn("222", csv_text)
 
+    def test_a_search_matching_nothing_shows_a_message_instead_of_a_blank_table(self):
+        # Hit live: filtering to zero rows left a blank table with no explanation -- "No leads yet"
+        # (which invites running a scrape) only ever covered the case of genuinely having none at all.
+        db.insert_if_new(self.db_path, {"phone": "111", "company_name": "Real Hauler"})
+        self.goto()
+        self.page.locator("#search").fill("no such company")
+        expect(self.page.locator("#rows tr")).to_have_count(0)
+        expect(self.page.locator("#empty")).to_be_visible()
+        expect(self.page.locator("#empty")).to_have_text("No leads match your search and filters.")
+
 
 class StatusAndNotesTests(BrowserTestCase):
     def test_changing_status_saves_and_persists_across_a_reload(self):
-        # statusCell's onchange handler calls renderLeads() right after a successful save (to
-        # re-sort/re-dim the row for its new status), which replaces the "Saved" tag element with a
-        # fresh one before a test could ever catch its brief "show" state -- so this checks the
-        # thing that actually matters (the save itself, and the value surviving a reload) instead.
+        # statusCell's onchange handler used to call renderLeads() right after a successful save (to
+        # re-dim the row for its new status), which replaced the "Saved" tag element with a fresh one
+        # before it ever got to show -- it now just toggles the row's dimmed class directly, so the
+        # tag survives and both are checkable here.
         db.insert_if_new(self.db_path, {"phone": "111", "company_name": "A"})
         self.goto()
         self.page.locator("td.interested select").select_option("Not interested")
-        expect(self.page.locator("#rows tr")).to_have_class("excluded", timeout=5000)  # re-rendered (dimmed), so the save landed
+        expect(self.page.locator("#rows tr")).to_have_class("excluded", timeout=5000)  # dimmed in place
+        expect(self.page.locator(".saved-tag").first).to_have_class("saved-tag show")
         self.assertEqual(db.all_leads(self.db_path)[0]["status"], "Not interested")
         self.page.reload()
         expect(self.page.locator("td.interested select")).to_have_value("Not interested")
@@ -216,6 +227,9 @@ class RemoveUndoTests(BrowserTestCase):
         expect(btn).to_have_text("Confirm remove?")
         expect(self.page.locator("#rows tr")).to_have_count(1)  # not removed yet
 
+        # A real confirm click comes after the user actually reads "Confirm remove?" -- comfortably
+        # past the double-click guard's window (see test_a_double_click_does_not_remove below).
+        self.page.wait_for_timeout(500)
         btn.click()
         expect(self.page.locator("#rows tr")).to_have_count(0)
         expect(self.page.locator("#undoBar")).to_be_visible()
@@ -230,11 +244,22 @@ class RemoveUndoTests(BrowserTestCase):
         expect(self.page.locator(".removeBtn")).to_have_text("Remove", timeout=6000)
         self.assertFalse(db.is_rejected(self.db_path, "111"))
 
+    def test_a_double_click_does_not_remove(self):
+        # Hit live: a native double-click fires two ordinary "click" events back to back, which used
+        # to land as "arm the confirmation" immediately followed by "confirm it" -- removing the lead
+        # without the user ever consciously seeing the "Confirm remove?" step in between.
+        db.insert_if_new(self.db_path, {"phone": "111", "company_name": "Junk Co"})
+        self.goto()
+        self.page.locator(".removeBtn").dblclick()
+        expect(self.page.locator("#rows tr")).to_have_count(1)  # still there -- the double-click didn't confirm it
+        self.assertFalse(db.is_rejected(self.db_path, "111"))
+
     def test_undo_brings_the_lead_back(self):
         db.insert_if_new(self.db_path, {"phone": "111", "company_name": "Oops Co"})
         self.goto()
         btn = self.page.locator(".removeBtn")
         btn.click()
+        self.page.wait_for_timeout(500)
         btn.click()
         expect(self.page.locator("#rows tr")).to_have_count(0)
         self.page.locator("#undoBtn").click()
@@ -298,6 +323,19 @@ class BackupPauseTests(BrowserTestCase):
         toggle.click()
         expect(self.page.locator("#backupPausedNote")).to_be_hidden()
         self.assertFalse(db.backups_paused(self.db_path))
+
+
+class ConnectivityTests(BrowserTestCase):
+    def test_an_unreachable_server_shows_a_banner_and_clears_once_it_recovers(self):
+        # Hit live: poll() failing (server down, network blip) was swallowed by its own .catch(() =>
+        # {}) with nothing on the page saying why the table had gone stale.
+        db.insert_if_new(self.db_path, {"phone": "111", "company_name": "A"})
+        self.goto()
+        expect(self.page.locator("#connWarn")).to_be_hidden()
+        self.page.route("**/api/status", lambda route: route.abort())
+        expect(self.page.locator("#connWarn")).to_be_visible(timeout=5000)
+        self.page.unroute("**/api/status")
+        expect(self.page.locator("#connWarn")).to_be_hidden(timeout=5000)
 
 
 class RestoreFailureTests(BrowserTestCase):

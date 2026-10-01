@@ -16,10 +16,12 @@
   * { box-sizing: border-box; }
   body { margin: 0; background: var(--bg); color: var(--text);
          font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
-  header { padding: 20px 24px 0; max-width: 1200px; margin: 0 auto; }
+  header { padding: 20px 24px 0; max-width: 1600px; margin: 0 auto; }
   h1 { margin: 0; font-size: 20px; }
   .sub { color: var(--muted); margin-top: 2px; }
-  main { max-width: 1200px; margin: 0 auto; padding: 16px 24px 40px; display: grid; gap: 16px;
+  /* 1200px used to cap the whole page even on a wide monitor, which left the 14-column leads table
+     scrolling horizontally past Notes/Remove at widths where there was plenty of room to show them. */
+  main { max-width: 1600px; margin: 0 auto; padding: 16px 24px 40px; display: grid; gap: 16px;
          grid-template-columns: 340px minmax(0, 1fr); align-items: start; }
   @media (max-width: 860px) { main { grid-template-columns: minmax(0, 1fr); padding: 16px; } header { padding: 16px 16px 0; } }
   .card { min-width: 0; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px; }
@@ -110,6 +112,9 @@
 <header>
   <h1>TrashLeadGen</h1>
   <div class="sub">Residential trash-pickup companies across the U.S., from open map data. Free, no API key.</div>
+  <div class="backupWarn" id="connWarn" hidden>
+    ⚠ Can't reach the server right now. Retrying automatically -- edits made while this is up may not be saved.
+  </div>
   <div class="backupWarn" id="restoreWarn" hidden>
     ⚠ <span id="restoreWarnText"></span> <button type="button" class="link" id="retryRestore">Try again</button>
   </div>
@@ -119,7 +124,10 @@
   <div class="backupPaused" id="backupPausedNote" hidden>
     <span>⏸ External backups are paused -- nothing is being pushed. Changes still save on this server.</span>
   </div>
-  <button type="button" class="link backupToggle" id="backupToggle"></button>
+  <div class="row" style="justify-content:flex-start;gap:12px">
+    <button type="button" class="link backupToggle" id="backupToggle"></button>
+    <span class="sub" id="backupLastSuccess"></span>
+  </div>
 </header>
 
 <main>
@@ -150,7 +158,7 @@
   </div>
 
   <section class="card">
-    <h2>Leads ready to call</h2>
+    <h2>Leads found</h2>
     <div class="undoBar" id="undoBar" hidden>
       <span id="undoText"></span>
       <button type="button" class="link" id="undoBtn">Undo</button>
@@ -168,9 +176,9 @@
       <label class="sr-only" for="stateFilter">Filter by state</label>
       <select id="stateFilter"><option value="">All states</option></select>
       <label class="emailFilter"><input type="checkbox" id="emailFilter">Has email</label>
-      <button id="copy">Copy phones</button>
-      <button id="copyEmails">Copy emails</button>
-      <a id="download" class="btn-link" href="/api/export.csv" download>Download CSV</a>
+      <button id="copy" title="Copies phones from the leads currently shown below (respects search and filters).">Copy phones</button>
+      <button id="copyEmails" title="Copies emails from the leads currently shown below (respects search and filters).">Copy emails</button>
+      <a id="download" class="btn-link" href="/api/export.csv" download title="Downloads every callable lead, ignoring the search box and filters above.">Download CSV</a>
     </div>
     <div class="scroll">
       <table>
@@ -286,7 +294,11 @@ function statusCell(l) {
       l.status = value;
       clearUnsavedError(err, sel);
       flashSaved(tag);
-      renderLeads();
+      // A full renderLeads() here used to rebuild the whole table immediately after flashSaved(),
+      // destroying the "Saved" tag's DOM node before the browser ever painted it. Toggling the
+      // dimmed-row class directly on this row is the only thing a status change actually needs.
+      const tr = sel.closest("tr");
+      if (tr) tr.classList.toggle("excluded", DO_NOT_EXPORT.has(value));
     } catch (e) {
       // The save didn't happen -- the dropdown must not keep showing a value that was never
       // actually recorded, which previously made a failed save indistinguishable from a successful
@@ -367,11 +379,12 @@ function removeCell(l) {
   // A native confirm() dialog reads like the browser interrupting, not the page -- an inline
   // click-to-confirm on the button itself (reverting on its own after a few seconds, same pattern
   // Undo already uses) matches the rest of the page's design instead.
-  let confirming = false, resetTimer = null;
+  let confirming = false, resetTimer = null, confirmedAt = 0;
   const reset = () => { confirming = false; btn.textContent = "Remove"; btn.setAttribute("aria-label", label); };
   btn.onclick = async () => {
     if (!confirming) {
       confirming = true;
+      confirmedAt = Date.now();
       btn.textContent = "Confirm remove?";
       btn.setAttribute("aria-label", `Confirm: ${label}. Marks it as not a residential trash hauler, ` +
         "so it stays off future scrapes too. You can undo this for a few seconds after.");
@@ -379,6 +392,10 @@ function removeCell(l) {
       resetTimer = setTimeout(reset, 4000);
       return;
     }
+    // A real double-click delivers two separate click events in quick succession -- without this,
+    // that lands as "arm the confirmation" immediately followed by "confirm it", removing the lead
+    // without the user ever consciously seeing the confirm step in between.
+    if (Date.now() - confirmedAt < 400) return;
     clearTimeout(resetTimer);
     reset();
     try {
@@ -452,15 +469,21 @@ function renderLeads() {
   $("statEmails").textContent = leads.filter(l => l.email).length;
   $("statStates").textContent = new Set(leads.map(l => l.state).filter(Boolean)).size;
   $("statShown").textContent = shown.length;
-  $("empty").hidden = leads.length > 0;
-  // An empty list because the restore failed must never read like a genuinely fresh install -- the
-  // real leads are one successful retry away, not gone. See the restoreWarn banner above for the
-  // actual error; this just makes sure "No leads yet" (which invites running a scrape -- exactly
-  // the action that would overwrite the real data once it's finally restored) never shows here.
-  if (!leads.length) {
-    $("empty").textContent = restoreFailed
-      ? "Couldn't load your saved leads yet. See the message above -- don't run a scrape until it's resolved."
-      : "No leads yet. Click Run scrape to collect them.";
+  // Hide the table and show one message in its place whenever there's nothing to show a row for --
+  // either there are genuinely no leads at all, or the search/state/email filters above just don't
+  // match anything right now. Previously only the first case was handled, so filtering down to zero
+  // results left a blank table with no row and no explanation.
+  $("empty").hidden = shown.length > 0;
+  if (!shown.length) {
+    $("empty").textContent = !leads.length
+      ? (restoreFailed
+          // An empty list because the restore failed must never read like a genuinely fresh install
+          // -- the real leads are one successful retry away, not gone. See the restoreWarn banner
+          // above for the actual error; "No leads yet" (which invites running a scrape -- exactly
+          // the action that would overwrite the real data once it's finally restored) never shows here.
+          ? "Couldn't load your saved leads yet. See the message above -- don't run a scrape until it's resolved."
+          : "No leads yet. Click Run scrape to collect them.")
+      : "No leads match your search and filters.";
   }
   const states = [...new Set(leads.map(l => l.state).filter(Boolean))].sort();
   const cur = $("stateFilter").value;
@@ -483,6 +506,20 @@ async function loadGroups() {
   }
 }
 
+// A short "how long ago" string for the last successful backup -- lets the owner tell "backups are
+// fine, just quiet between edits" apart from "the last one succeeded a worryingly long time ago"
+// without having to know how to read an ISO timestamp.
+function timeAgo(isoString) {
+  const seconds = Math.max(0, (Date.now() - new Date(isoString).getTime()) / 1000);
+  if (seconds < 60) return "just now";
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return `${minutes} minute${minutes === 1 ? "" : "s"} ago`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 24) return `${hours} hour${hours === 1 ? "" : "s"} ago`;
+  const days = Math.round(hours / 24);
+  return `${days} day${days === 1 ? "" : "s"} ago`;
+}
+
 // How far through the current run we are, from the scraper's own "[3/13] CO: ..." progress lines
 // -- so the bar actually fills in as states finish instead of jumping to 100% the instant it starts.
 function progressFraction(log) {
@@ -494,7 +531,17 @@ function progressFraction(log) {
 }
 
 async function poll() {
-  const s = await api("/api/status");
+  // A dead/unreachable server used to just make this silently stop updating, with nothing on the
+  // page saying why -- the leads table would simply go stale with no explanation. Surface it as its
+  // own banner instead, and recover automatically (this runs every 2s) once the server answers again.
+  let s;
+  try {
+    s = await api("/api/status");
+    $("connWarn").hidden = true;
+  } catch (e) {
+    $("connWarn").hidden = false;
+    return;
+  }
   $("progressCard").hidden = !s.started;
   $("run").disabled = s.running;
   $("stop").hidden = !s.running;
@@ -555,6 +602,8 @@ async function poll() {
   $("backupPausedNote").hidden = !s.backupsPaused;
   $("backupToggle").textContent = s.backupsPaused ? "Resume external backups" : "Pause external backups";
   $("backupToggle").dataset.paused = s.backupsPaused ? "0" : "1";  // what clicking it should set next
+  $("backupLastSuccess").textContent = s.backupLastSuccessAt
+    ? `Last backup: ${timeAgo(s.backupLastSuccessAt)}` : "No backup yet this session";
   // A failed restore at start-up is a different, much worse situation than an ordinary backup
   // failure -- see db.restore_if_empty's docstring. The page must never show the "No leads yet"
   // empty state here (renderLeads' empty-state branch checks restoreFailed for this), and Run
@@ -666,15 +715,18 @@ $("retryFailed").onclick = async () => {
 $("copyEmails").onclick = async () => {
   const emails = renderLeads().filter(l => !DO_NOT_EXPORT.has(l.status)).map(l => l.email).filter(Boolean);
   const ok = await copyText(emails.join("\n"));
-  $("copyEmails").textContent = ok ? "Copied!" : "See prompt";
-  setTimeout(() => $("copyEmails").textContent = "Copy emails", 1200);
+  // Names the actual count copied, since this list (the currently-shown/filtered rows) is not
+  // necessarily the same set Download CSV exports (every callable lead, filters or not) -- seeing
+  // "Copied 6!" here versus a CSV with 40 rows is the clue that the two use a different scope.
+  $("copyEmails").textContent = ok ? `Copied ${emails.length}!` : "See prompt";
+  setTimeout(() => $("copyEmails").textContent = "Copy emails", 1500);
 };
 
 $("copy").onclick = async () => {
   const phones = renderLeads().filter(l => !DO_NOT_EXPORT.has(l.status)).map(l => l.phone);
   const ok = await copyText(phones.join("\n"));
-  $("copy").textContent = ok ? "Copied!" : "See prompt";
-  setTimeout(() => $("copy").textContent = "Copy phones", 1200);
+  $("copy").textContent = ok ? `Copied ${phones.length}!` : "See prompt";
+  setTimeout(() => $("copy").textContent = "Copy phones", 1500);
 };
 
 loadLeads(); loadGroups(); poll();

@@ -190,6 +190,10 @@ def build_query(state_code):
 def normalize_phone(raw):
     """Return a US phone as '(555) 123-4567', or None if it isn't a valid 10-digit number."""
     for candidate in re.split(r"[;,/]", raw or ""):
+        # Drop a trailing extension ("ext. 12", "extension 100", "x5") before counting digits --
+        # otherwise its digits land on the end of the main number and push the count past a valid
+        # 10/11, silently dropping an otherwise-normal lead that happens to list one.
+        candidate = re.sub(r"\s*(?:ext\.?|extension|x)\s*\d+\s*$", "", candidate, flags=re.I)
         digits = re.sub(r"\D", "", candidate)
         if len(digits) == 11 and digits.startswith("1"):
             digits = digits[1:]
