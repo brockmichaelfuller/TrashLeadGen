@@ -29,6 +29,7 @@ GITHUB_API = "https://api.github.com"
 GITHUB_CSV_PATH = "output/leads.csv"
 
 SUPABASE_TABLE = "leads"
+SUPABASE_SETTINGS_TABLE = "app_settings"
 
 # Defense in depth against the restore-failure overwrite bug (see restore()'s docstring): even if a
 # scrape somehow runs against a wrongly-empty local database, these two columns can never be blanked
@@ -166,6 +167,62 @@ def pull_supabase(local_path):
         writer = csv.writer(f)
         writer.writerow(colnames)
         writer.writerows(rows)
+
+
+def get_setting(key, default=None):
+    """Read a small piece of app state (e.g. whether backups are paused) from Supabase, so it
+    survives a Render restart -- a flag file on local disk doesn't, since the free plan's disk is
+    wiped on every restart, which previously meant Pause silently turned itself back on exactly
+    when a restart was already the risky moment. Returns `default` (never raises) if Supabase isn't
+    configured, the settings table doesn't exist yet, the key isn't set, or anything errors."""
+    conn_str = os.environ.get("SUPABASE_DB_URL")
+    if not conn_str:
+        return default
+    try:
+        import psycopg2
+    except ImportError as error:
+        _warn("Supabase settings read", error)
+        return default
+    try:
+        with psycopg2.connect(conn_str, connect_timeout=10) as conn:
+            with conn.cursor() as cur:
+                cur.execute(f"CREATE TABLE IF NOT EXISTS {SUPABASE_SETTINGS_TABLE} "
+                            "(key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+                cur.execute(f"SELECT value FROM {SUPABASE_SETTINGS_TABLE} WHERE key = %s", (key,))
+                row = cur.fetchone()
+                return row[0] if row else default
+    except psycopg2.Error as error:
+        _warn("Supabase settings read", f"{type(error).__name__}: {error}")
+        return default
+
+
+def set_setting(key, value):
+    """Write a small piece of app state to Supabase. Returns True on success, False otherwise (never
+    raises) -- callers that need this to actually be durable (not just locally remembered) should
+    check the return value, since a False here means the setting only applies to this process until
+    Supabase is reachable again."""
+    conn_str = os.environ.get("SUPABASE_DB_URL")
+    if not conn_str:
+        return False
+    try:
+        import psycopg2
+    except ImportError as error:
+        _warn("Supabase settings write", error)
+        return False
+    try:
+        with psycopg2.connect(conn_str, connect_timeout=10) as conn:
+            with conn.cursor() as cur:
+                cur.execute(f"CREATE TABLE IF NOT EXISTS {SUPABASE_SETTINGS_TABLE} "
+                            "(key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+                cur.execute(
+                    f"INSERT INTO {SUPABASE_SETTINGS_TABLE} (key, value) VALUES (%s, %s) "
+                    "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
+                    (key, value),
+                )
+        return True
+    except psycopg2.Error as error:
+        _warn("Supabase settings write", f"{type(error).__name__}: {error}")
+        return False
 
 
 def sync(local_path):

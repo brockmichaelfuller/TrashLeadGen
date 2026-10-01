@@ -340,6 +340,35 @@ class BackupsPausedTests(unittest.TestCase):
             mock_sync.assert_called_once()
 
 
+class BackupsPausedDurabilityTests(unittest.TestCase):
+    """Hit live: the pause flag was a file on Render's free-plan disk, which is wiped on every
+    restart -- Pause silently turned itself back on exactly when a restart was already the risky
+    moment (see item 1's overwrite bug). When Supabase is configured, the pause state is stored
+    there instead, via sync_leads.get_setting/set_setting, so it survives a restart."""
+
+    @patch.dict("os.environ", {"SUPABASE_DB_URL": "postgresql://x"}, clear=True)
+    def test_set_and_get_round_trip_through_supabase_not_the_local_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "leads.db"
+            with patch.object(db.sync_leads, "set_setting") as mock_set, \
+                 patch.object(db.sync_leads, "get_setting", return_value="1") as mock_get:
+                db.set_backups_paused(db_path, True)
+                self.assertTrue(db.backups_paused(db_path))
+            mock_set.assert_called_once_with("backups_paused", "1")
+            mock_get.assert_called_once_with("backups_paused", "0")
+            self.assertFalse(db._pause_flag_path(db_path).exists())  # never touches the local file
+
+    @patch.dict("os.environ", {"SUPABASE_DB_URL": "postgresql://x"}, clear=True)
+    def test_fails_open_not_paused_when_supabase_is_unreachable(self):
+        # A transient Supabase outage must never silently stop backups by reporting "paused" when
+        # the real answer just couldn't be determined -- same fail-open philosophy as every other
+        # backup operation.
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "leads.db"
+            with patch.object(db.sync_leads, "get_setting", return_value="0"):  # get_setting itself
+                self.assertFalse(db.backups_paused(db_path))                   # already fails open
+
+
 class ConcurrencyTests(unittest.TestCase):
     def test_concurrent_inserts_from_multiple_threads_never_duplicate_or_lose_a_phone(self):
         # This replaces the old fcntl-lock-based test: WAL mode + busy_timeout should make this safe

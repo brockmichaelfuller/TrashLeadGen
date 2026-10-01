@@ -184,20 +184,31 @@ def is_empty(db_path):
         return conn.execute("SELECT 1 FROM leads LIMIT 1").fetchone() is None
 
 
+_PAUSE_SETTING_KEY = "backups_paused"
+
+
 def _pause_flag_path(db_path):
     return Path(db_path).with_name(Path(db_path).name + ".backups_paused")
 
 
 def backups_paused(db_path):
-    """Whether external (GitHub/Sheets) backup pushes are currently paused -- a plain flag file
-    next to the database, not an environment variable, so it can be toggled at runtime by anyone
-    with access to the page without restarting the service (an env var change on Render restarts
-    it). Checked by sync_backup() directly, so it applies the same way regardless of whether the
-    web app or the scraper subprocess is the one calling it."""
+    """Whether external backup pushes are currently paused. Stored in Supabase when it's configured
+    (a settings row survives a Render restart, unlike a flag file on the free plan's disk -- which
+    used to mean Pause silently turned itself back on after a restart, exactly the moment a paused
+    backup was most likely to matter). Falls back to a local flag file next to the database only
+    when Supabase isn't configured at all, since there's nowhere else durable to put it then.
+    Checked by sync_backup() directly, so it applies the same way regardless of whether the web app
+    or the scraper subprocess is the one calling it. Fails open (not paused) if Supabase is
+    configured but momentarily unreachable, same as every other backup operation."""
+    if os.environ.get("SUPABASE_DB_URL"):
+        return sync_leads.get_setting(_PAUSE_SETTING_KEY, "0") == "1"
     return _pause_flag_path(db_path).exists()
 
 
 def set_backups_paused(db_path, paused):
+    if os.environ.get("SUPABASE_DB_URL"):
+        sync_leads.set_setting(_PAUSE_SETTING_KEY, "1" if paused else "0")
+        return
     flag = _pause_flag_path(db_path)
     if paused:
         flag.parent.mkdir(parents=True, exist_ok=True)

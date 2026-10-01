@@ -109,6 +109,8 @@ A save from the web page (a status/notes edit or a delete/undo) writes to disk i
 
 Anyone who can reach the page (i.e. anyone with the `APP_PASSWORD`, once one is set) can do any of these; there's no separate owner role.
 
+The pause itself survives a restart when `SUPABASE_DB_URL` is set -- it's a settings row in Supabase (`app_settings`, created automatically the first time it's needed), not a file on Render's disk. Without Supabase configured, it falls back to a local flag file, which does **not** survive a restart on Render's free plan (it'll quietly resume on the next cold start) -- the same limitation local-only use has for everything else.
+
 ## Recurring lead-quality audits
 
 `audit_log.json` tracks which leads have already been reviewed (by a person or by an AI session) for actually being a residential curbside hauler, so a recurring audit only looks at leads it hasn't seen before instead of starting over each time. It's read and written by whatever process runs that audit (a Claude Code session, following its own setup instructions). The app itself also reads it, but only the `"deleted"` verdicts, and only to keep them rejected in the database (see `db.import_audit_log_rejections`, run at startup by both `app.py` and `lead_scraper.py`) — a lead the audit removed with older code, before permanent rejection existed, would otherwise come back as new on a later scrape. Commit `audit_log.json` whenever an audit runs, regardless of which session ran it, so the history carries over.

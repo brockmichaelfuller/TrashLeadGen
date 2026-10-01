@@ -355,6 +355,52 @@ class SupabaseEnabledTests(unittest.TestCase):
         self.assertEqual(by_phone["2"]["rejected_at"], "2026-09-24")
 
 
+class SettingsTests(unittest.TestCase):
+    """Backs the durable-pause fix (item 6): a setting stored here survives a Render restart, unlike
+    the old flag-file-on-local-disk approach."""
+
+    @patch.dict("os.environ", {}, clear=True)
+    def test_get_returns_the_default_without_supabase_configured(self):
+        self.assertEqual(sync_leads.get_setting("backups_paused", "0"), "0")
+
+    @patch.dict("os.environ", {}, clear=True)
+    def test_set_returns_false_without_supabase_configured(self):
+        self.assertFalse(sync_leads.set_setting("backups_paused", "1"))
+
+    @patch.dict("os.environ", {"SUPABASE_DB_URL": "postgresql://x"}, clear=True)
+    def test_set_then_get_round_trips(self):
+        table = {}
+
+        def fake_execute(sql, params=None):
+            if sql.startswith("CREATE TABLE"):
+                return
+            if sql.startswith("INSERT"):
+                table[params[0]] = params[1]
+            elif sql.startswith("SELECT"):
+                fake_execute.last_result = (table[params[0]],) if params[0] in table else None
+
+        mock_psycopg2, mock_cur, _ = _fake_psycopg2_module()
+        mock_cur.execute.side_effect = fake_execute
+        mock_cur.fetchone.side_effect = lambda: fake_execute.last_result
+        with patch.dict(sys.modules, {"psycopg2": mock_psycopg2}):
+            self.assertTrue(sync_leads.set_setting("backups_paused", "1"))
+            self.assertEqual(sync_leads.get_setting("backups_paused", "0"), "1")
+
+    @patch.dict("os.environ", {"SUPABASE_DB_URL": "postgresql://x"}, clear=True)
+    def test_get_falls_back_to_default_on_a_database_error(self):
+        mock_psycopg2, mock_cur, _ = _fake_psycopg2_module()
+        mock_psycopg2.connect.side_effect = Exception("timeout")
+        with patch.dict(sys.modules, {"psycopg2": mock_psycopg2}):
+            self.assertEqual(sync_leads.get_setting("backups_paused", "0"), "0")
+
+    @patch.dict("os.environ", {"SUPABASE_DB_URL": "postgresql://x"}, clear=True)
+    def test_set_returns_false_on_a_database_error(self):
+        mock_psycopg2, mock_cur, _ = _fake_psycopg2_module()
+        mock_psycopg2.connect.side_effect = Exception("timeout")
+        with patch.dict(sys.modules, {"psycopg2": mock_psycopg2}):
+            self.assertFalse(sync_leads.set_setting("backups_paused", "1"))
+
+
 class RestoreTests(unittest.TestCase):
     """restore()'s priority used to be GitHub-first unconditionally -- a stale GitHub copy could
     then win over a fully current Supabase, even though Supabase is where the owner decided leads
