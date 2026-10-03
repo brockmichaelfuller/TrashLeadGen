@@ -7,6 +7,22 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    services:
+      # Supabase is this app's only storage -- every test that touches a lead needs a real Postgres
+      # to talk to. This is a disposable, local-to-the-job instance, never the real Supabase project.
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      SUPABASE_DB_URL: postgresql://postgres:postgres@localhost:5432/postgres
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -14,5 +30,25 @@ jobs:
           python-version: "3.11"
       - run: pip install -r requirements-dev.txt pyflakes
       - run: playwright install --with-deps chromium
-      - run: python -m pyflakes app.py db.py lead_scraper.py sync_leads.py tests
+      - name: Create schema
+        run: |
+          psql "$SUPABASE_DB_URL" -c "
+          create table leads (
+            phone text primary key,
+            company_name text not null default '',
+            email text not null default '',
+            website text not null default '',
+            address text not null default '',
+            city text not null default '',
+            state text not null default '',
+            timezone text not null default '',
+            source text not null default '',
+            date_collected text not null default '',
+            status text not null default '',
+            notes text not null default '',
+            rejected_at text not null default '',
+            updated_at text not null default '',
+            created_at text not null default ''
+          );"
+      - run: python -m pyflakes app.py db.py lead_scraper.py tests
       - run: python -m unittest discover -s tests -t .

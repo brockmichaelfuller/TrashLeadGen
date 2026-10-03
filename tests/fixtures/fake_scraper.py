@@ -26,7 +26,6 @@ import db  # noqa: E402
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--states", nargs="+", default=[])
     args = parser.parse_args()
 
@@ -50,11 +49,11 @@ def main():
             time.sleep(int(state[4:] or 3) / 10)
         else:
             time.sleep(0.05)
-        db.insert_if_new(args.output, {"phone": f"(555) 000-{i:04d}", "company_name": f"Fake Co {state}",
-                                        "state": state, "email": f"fake{i}@example.com"})
+        db.insert_if_new({"phone": f"(555) 000-{i:04d}", "company_name": f"Fake Co {state}",
+                           "state": state, "email": f"fake{i}@example.com"})
         print(f"{label} {state}: 1 new companies")
 
-    print(f"Done. 0 new rows -> {args.output} (0 total unique phones)")
+    print("Done. 0 new rows -> Supabase (0 total unique phones)")
 
 
 if __name__ == "__main__":

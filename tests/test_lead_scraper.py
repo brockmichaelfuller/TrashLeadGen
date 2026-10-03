@@ -9,6 +9,7 @@ import lead_scraper
 from lead_scraper import (STATE_GROUPS, STATES, UNREACHABLE_ERROR_MESSAGE, _friendly_error, clean_email,
                            element_to_row, is_complete, is_rejected, missing_fields, normalize_phone, run,
                            website_offers_residential_pickup)
+from tests.helpers import clear_leads_table, requires_db
 
 
 class NormalizePhoneTests(unittest.TestCase):
@@ -292,83 +293,45 @@ class LogDebugDetailTests(unittest.TestCase):
         except ValueError as caught:
             error = caught
         with tempfile.TemporaryDirectory() as tmp:
-            output_path = Path(tmp) / "leads.db"
-            lead_scraper.log_debug_detail(output_path, "CO", error)
-            content = (Path(tmp) / "debug.log").read_text()
+            debug_path = Path(tmp) / "debug.log"
+            with patch("lead_scraper.DEBUG_LOG_PATH", debug_path):
+                lead_scraper.log_debug_detail("CO", error)
+            content = debug_path.read_text()
         self.assertIn("ValueError: boom", content)
         self.assertNotIn("NoneType: None", content)
         self.assertIn("raise ValueError", content)  # the actual traceback line, not just the header
 
 
+@requires_db
 class RunResilienceTests(unittest.TestCase):
-    """Hit live: a failure past the network fetch (in this case, the backup sync step) crashed the
-    whole run instead of just skipping that one state, because only fetch_elements() was wrapped in
-    a try/except. The whole per-state body is wrapped now -- this proves a state that raises partway
-    through doesn't stop the next one from being processed.
+    """Hit live: a failure past the network fetch crashed the whole run instead of just skipping
+    that one state, because only fetch_elements() was wrapped in a try/except. The whole per-state
+    body is wrapped now -- this proves a state that raises partway through doesn't stop the next one
+    from being processed. These need a real Postgres (see tests/helpers.py) since run() writes
+    straight to it now, with no mockable backup-sync seam in between."""
 
-    sync_leads is imported by db.py (which lead_scraper.py's run()/_attempt_state now delegate backup
-    to), not by lead_scraper.py itself -- so these patch db.sync_leads, not lead_scraper.sync_leads."""
+    def setUp(self):
+        clear_leads_table()
 
     def test_a_failure_after_a_successful_fetch_does_not_abort_the_run(self):
         elements = {
             "CO": [{"type": "node", "id": 1, "tags": {"name": "Acme Waste", "phone": "303-343-7096"}}],
             "WY": [{"type": "node", "id": 2, "tags": {"name": "Rocky Mountain Waste", "phone": "307-555-0100"}}],
         }
-        with tempfile.TemporaryDirectory() as tmp:
-            db_path = Path(tmp) / "leads.db"
-            # CO's backup sync blows up on round 1, then succeeds on the automatic retry round; WY
-            # is fine throughout. insert_if_new already landed the row before sync_backup is called,
-            # so a sync failure doesn't lose the row -- it just gets logged as this state failing.
-            with patch("lead_scraper.fetch_elements", side_effect=lambda state: elements[state]), \
-                 patch.object(db.sync_leads, "restore", return_value=None), \
-                 patch.object(db.sync_leads, "sync",
-                               side_effect=[RuntimeError("simulated backup failure"), None, None]), \
-                 patch("lead_scraper.time.sleep"):
-                run(db_path, ["CO", "WY"])  # must not raise
-            rows = db.all_leads(db_path)
+        with patch("lead_scraper.fetch_elements", side_effect=lambda state: elements[state]), \
+             patch("lead_scraper.time.sleep"):
+            run(["CO", "WY"])  # must not raise
+        rows = db.all_leads()
         self.assertEqual({r["company_name"] for r in rows}, {"Acme Waste", "Rocky Mountain Waste"})
-
-    def test_a_backup_failure_prints_a_marker_line_app_py_can_pick_up(self):
-        # app.py's pump_output() (reading this subprocess's output live) watches for exactly this
-        # "BACKUP_ERROR: "/"BACKUP_OK" line shape to drive the same banner an edit-triggered backup
-        # failure shows -- see PumpOutputTests in test_app.py.
-        elements = {"CO": [{"type": "node", "id": 1, "tags": {"name": "Acme Waste", "phone": "303-343-7096"}}]}
-        with tempfile.TemporaryDirectory() as tmp:
-            db_path = Path(tmp) / "leads.db"
-            with patch("lead_scraper.fetch_elements", side_effect=lambda state: elements[state]), \
-                 patch.object(db.sync_leads, "restore", return_value=None), \
-                 patch.object(db.sync_leads, "sync", return_value="GitHub push failed: HTTP 500"), \
-                 patch("lead_scraper.time.sleep"), \
-                 patch("builtins.print") as mock_print:
-                run(db_path, ["CO"])
-        printed = [c.args[0] for c in mock_print.call_args_list if c.args]
-        self.assertIn("BACKUP_ERROR: GitHub push failed: HTTP 500", printed)
-
-    def test_a_successful_backup_prints_an_ok_marker(self):
-        elements = {"CO": [{"type": "node", "id": 1, "tags": {"name": "Acme Waste", "phone": "303-343-7096"}}]}
-        with tempfile.TemporaryDirectory() as tmp:
-            db_path = Path(tmp) / "leads.db"
-            with patch("lead_scraper.fetch_elements", side_effect=lambda state: elements[state]), \
-                 patch.object(db.sync_leads, "restore", return_value=None), \
-                 patch.object(db.sync_leads, "sync", return_value=None), \
-                 patch("lead_scraper.time.sleep"), \
-                 patch("builtins.print") as mock_print:
-                run(db_path, ["CO"])
-        printed = [c.args[0] for c in mock_print.call_args_list if c.args]
-        self.assertIn("BACKUP_OK", printed)
 
     def test_does_not_sleep_after_the_last_state_of_a_run(self):
         # Hit live: the per-request delay used to run unconditionally after every state, including
         # the very last one of the whole run -- pure wasted wall-clock time with no further request
         # left to rate-limit against.
         elements = {"CO": [{"type": "node", "id": 1, "tags": {"name": "Acme Waste", "phone": "303-343-7096"}}]}
-        with tempfile.TemporaryDirectory() as tmp:
-            db_path = Path(tmp) / "leads.db"
-            with patch("lead_scraper.fetch_elements", side_effect=lambda state: elements[state]), \
-                 patch.object(db.sync_leads, "restore", return_value=None), \
-                 patch.object(db.sync_leads, "sync", return_value=None), \
-                 patch("lead_scraper.time.sleep") as mock_sleep:
-                run(db_path, ["CO"])
+        with patch("lead_scraper.fetch_elements", side_effect=lambda state: elements[state]), \
+             patch("lead_scraper.time.sleep") as mock_sleep:
+            run(["CO"])
         mock_sleep.assert_not_called()
 
     def test_sleeps_between_states_but_not_after_the_last_one_in_a_round(self):
@@ -376,24 +339,16 @@ class RunResilienceTests(unittest.TestCase):
             "CO": [{"type": "node", "id": 1, "tags": {"name": "Acme Waste", "phone": "303-343-7096"}}],
             "WY": [{"type": "node", "id": 2, "tags": {"name": "Rocky Mountain Waste", "phone": "307-555-0100"}}],
         }
-        with tempfile.TemporaryDirectory() as tmp:
-            db_path = Path(tmp) / "leads.db"
-            with patch("lead_scraper.fetch_elements", side_effect=lambda state: elements[state]), \
-                 patch.object(db.sync_leads, "restore", return_value=None), \
-                 patch.object(db.sync_leads, "sync", return_value=None), \
-                 patch("lead_scraper.time.sleep") as mock_sleep:
-                run(db_path, ["CO", "WY"])
+        with patch("lead_scraper.fetch_elements", side_effect=lambda state: elements[state]), \
+             patch("lead_scraper.time.sleep") as mock_sleep:
+            run(["CO", "WY"])
         mock_sleep.assert_called_once()  # between CO and WY, not after WY
 
     def test_a_state_that_fails_every_round_ends_up_in_the_final_failed_summary(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            db_path = Path(tmp) / "leads.db"
-            with patch("lead_scraper.fetch_elements", side_effect=RuntimeError("still down")), \
-                 patch.object(db.sync_leads, "restore", return_value=None), \
-                 patch.object(db.sync_leads, "sync"), \
-                 patch("lead_scraper.time.sleep"), \
-                 patch("builtins.print") as mock_print:
-                run(db_path, ["CO"])
+        with patch("lead_scraper.fetch_elements", side_effect=RuntimeError("still down")), \
+             patch("lead_scraper.time.sleep"), \
+             patch("builtins.print") as mock_print:
+            run(["CO"])
         summary_lines = [c.args[0] for c in mock_print.call_args_list if c.args]
         self.assertTrue(any("Failed states (rerun to retry): CO" in line for line in summary_lines), summary_lines)
 
@@ -402,14 +357,10 @@ class RunResilienceTests(unittest.TestCase):
         # grinding through every state one at a time to report the same "can't connect" outcome 13
         # times. A handful of connection-refused states in a row means the service is unreachable
         # from here entirely, not just having a rough moment for one state -- stop early instead.
-        with tempfile.TemporaryDirectory() as tmp:
-            db_path = Path(tmp) / "leads.db"
-            with patch("lead_scraper.fetch_elements", side_effect=ConnectionError("Connection refused")), \
-                 patch.object(db.sync_leads, "restore", return_value=None), \
-                 patch.object(db.sync_leads, "sync"), \
-                 patch("lead_scraper.time.sleep"), \
-                 patch("builtins.print") as mock_print:
-                run(db_path, ["AL", "AK", "AZ", "AR"])
+        with patch("lead_scraper.fetch_elements", side_effect=ConnectionError("Connection refused")), \
+             patch("lead_scraper.time.sleep"), \
+             patch("builtins.print") as mock_print:
+            run(["AL", "AK", "AZ", "AR"])
         printed = [c.args[0] for c in mock_print.call_args_list if c.args]
         state_re = re.compile(r"^(?:\[\d+/\d+\]|still failing after retry:) (\S+): skipped")
         attempted = {m.group(1) for line in printed for m in [state_re.match(line)] if m}
@@ -421,14 +372,10 @@ class RunResilienceTests(unittest.TestCase):
         # to finish -- "blocked" wasn't covered by the early-abort, only "can't connect" was, so it
         # ran the full retry-round gauntlet before admitting nothing worked. A block is exactly as
         # unrecoverable-by-waiting as being unreachable, and needs the same early stop.
-        with tempfile.TemporaryDirectory() as tmp:
-            db_path = Path(tmp) / "leads.db"
-            with patch("lead_scraper.fetch_elements", side_effect=RuntimeError("403 Client Error: Forbidden")), \
-                 patch.object(db.sync_leads, "restore", return_value=None), \
-                 patch.object(db.sync_leads, "sync"), \
-                 patch("lead_scraper.time.sleep"), \
-                 patch("builtins.print") as mock_print:
-                run(db_path, ["AL", "AK", "AZ", "AR"])
+        with patch("lead_scraper.fetch_elements", side_effect=RuntimeError("403 Client Error: Forbidden")), \
+             patch("lead_scraper.time.sleep"), \
+             patch("builtins.print") as mock_print:
+            run(["AL", "AK", "AZ", "AR"])
         printed = [c.args[0] for c in mock_print.call_args_list if c.args]
         state_re = re.compile(r"^(?:\[\d+/\d+\]|still failing after retry:) (\S+): skipped")
         attempted = {m.group(1) for line in printed for m in [state_re.match(line)] if m}
@@ -440,14 +387,10 @@ class RunResilienceTests(unittest.TestCase):
     def test_does_not_abort_early_for_an_ordinary_slow_or_busy_response(self):
         # A slow/busy response usually clears on its own -- this must not trip the same early-abort
         # as "unreachable"/"blocked" do, or a run would give up after any two ordinary failures.
-        with tempfile.TemporaryDirectory() as tmp:
-            db_path = Path(tmp) / "leads.db"
-            with patch("lead_scraper.fetch_elements", side_effect=TimeoutError("timed out")), \
-                 patch.object(db.sync_leads, "restore", return_value=None), \
-                 patch.object(db.sync_leads, "sync"), \
-                 patch("lead_scraper.time.sleep"), \
-                 patch("builtins.print") as mock_print:
-                run(db_path, ["AL", "AK", "AZ", "AR"])
+        with patch("lead_scraper.fetch_elements", side_effect=TimeoutError("timed out")), \
+             patch("lead_scraper.time.sleep"), \
+             patch("builtins.print") as mock_print:
+            run(["AL", "AK", "AZ", "AR"])
         printed = [c.args[0] for c in mock_print.call_args_list if c.args]
         state_re = re.compile(r"^(?:\[\d+/\d+\]|still failing after retry:) (\S+): skipped")
         attempted = {m.group(1) for line in printed for m in [state_re.match(line)] if m}
@@ -458,22 +401,18 @@ class RunResilienceTests(unittest.TestCase):
         # any try/except (only _attempt_state's internals were covered), so a failure there crashed
         # the whole run after only 2 of 13 states with no explanation. This reproduces that failure
         # mode directly -- log_debug_detail raising for AL -- and proves AK still gets processed.
-        with tempfile.TemporaryDirectory() as tmp:
-            db_path = Path(tmp) / "leads.db"
-            calls = []
+        calls = []
 
-            def flaky_log_debug_detail(*args):
-                calls.append(args)
-                if len(calls) == 1:
-                    raise OSError("disk hiccup")
+        def flaky_log_debug_detail(*args):
+            calls.append(args)
+            if len(calls) == 1:
+                raise OSError("disk hiccup")
 
-            with patch("lead_scraper.fetch_elements", side_effect=RuntimeError("boom")), \
-                 patch("lead_scraper.log_debug_detail", side_effect=flaky_log_debug_detail), \
-                 patch.object(db.sync_leads, "restore", return_value=None), \
-                 patch.object(db.sync_leads, "sync"), \
-                 patch("lead_scraper.time.sleep"), \
-                 patch("builtins.print") as mock_print:
-                run(db_path, ["AL", "AK"])  # must not raise despite AL's logging call blowing up
+        with patch("lead_scraper.fetch_elements", side_effect=RuntimeError("boom")), \
+             patch("lead_scraper.log_debug_detail", side_effect=flaky_log_debug_detail), \
+             patch("lead_scraper.time.sleep"), \
+             patch("builtins.print") as mock_print:
+            run(["AL", "AK"])  # must not raise despite AL's logging call blowing up
         printed_states = {c.args[0].split(":")[0].split()[-1] for c in mock_print.call_args_list
                           if c.args and "skipped" in c.args[0]}
         self.assertIn("AK", printed_states)  # AK was still reached after AL's crash

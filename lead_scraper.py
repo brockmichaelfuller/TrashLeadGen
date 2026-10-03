@@ -2,8 +2,8 @@
 
 Uses the free Overpass API (no key needed). One run covers the whole U.S.: the free
 Overpass server can't answer a single nationwide query (it times out), so the search is
-split into 50 states + DC internally. Businesses that publish a phone number are saved to
-a SQLite database (db.py), deduped by phone number (the database's primary key).
+split into 50 states + DC internally. Businesses that publish a phone number are saved
+straight to Supabase (db.py), deduped by phone number (the database's primary key).
 """
 import argparse
 import concurrent.futures
@@ -339,13 +339,15 @@ def _friendly_error(error):
     return "the map data source had a temporary problem"
 
 
-def log_debug_detail(output_path, state, error):
-    """Append the real exception (with traceback) to debug.log, next to the CSV. The UI's log only
+DEBUG_LOG_PATH = Path(__file__).parent / "debug.log"
+
+
+def log_debug_detail(state, error):
+    """Append the real exception (with traceback) to debug.log, next to the script. The UI's log only
     ever shows _friendly_error()'s plain-English version; this is the raw detail for actually
     diagnosing a recurring failure, fetched separately via GET /api/debug.log."""
-    debug_path = output_path.parent / "debug.log"
     try:
-        with debug_path.open("a", encoding="utf-8") as f:
+        with DEBUG_LOG_PATH.open("a", encoding="utf-8") as f:
             f.write(f"\n--- {datetime.now().isoformat(timespec='seconds')} {state} ---\n")
             f.write(f"{type(error).__name__}: {error}\n")
             # traceback.print_exc() reads the *currently handled* exception (sys.exc_info()), which
@@ -379,12 +381,12 @@ RETRY_ROUND_DELAY_SECONDS = 90
 CONSECUTIVE_PERSISTENT_FAILURE_ABORT_THRESHOLD = 2
 
 
-def _attempt_state(state, db_path, seen, today):
-    """Fetch, write, and back up one state. Returns (new_count, error); error is None on success.
-    Everything is inside one try, so a failure anywhere in it -- not just the network call -- can
-    never kill the whole run; worst case this one state comes back as a failure to retry."""
+def _attempt_state(state, seen, today):
+    """Fetch and write one state. Returns (new_count, error); error is None on success. Everything
+    is inside one try, so a failure anywhere in it -- not just the network call -- can never kill
+    the whole run; worst case this one state comes back as a failure to retry."""
     try:
-        seen.update(db.existing_phones(db_path))  # pick up rows another scraper added meanwhile
+        seen.update(db.existing_phones())  # pick up rows another scraper added meanwhile
         elements = fetch_elements(state)
         candidates, candidate_phones = [], set()
         for element in elements:
@@ -401,36 +403,19 @@ def _attempt_state(state, db_path, seen, today):
         new = 0
         for row, keep in zip(candidates, keep_flags):
             # insert_if_new's primary-key constraint is the real guarantee against a duplicate --
-            # not the `seen` set above, which is just there to skip a repeat website check.
-            if keep and db.insert_if_new(db_path, row):
+            # not the `seen` set above, which is just there to skip a repeat website check. Writes
+            # straight to Supabase -- there's no local store and no separate backup step anymore.
+            if keep and db.insert_if_new(row):
                 seen.add(row["phone"])
                 new += 1
-        # Back it up, since a restart wipes the local disk. A failure here doesn't fail the state
-        # itself (the data is still safely on local disk either way) -- it's surfaced as its own
-        # BACKUP_ERROR/BACKUP_OK marker line instead, which app.py's pump_output() (reading this
-        # subprocess's output live) turns into the same banner an edit-triggered backup failure
-        # shows, rather than it only ever showing up as a raw line in the plain-language run log.
-        backup_error = db.sync_backup(db_path)
-        print(f"BACKUP_ERROR: {backup_error}" if backup_error else "BACKUP_OK")
         return new, None
     except Exception as error:  # one bad state must not stop the run
         return 0, error
 
 
-def run(db_path, states):
-    db_path.parent.mkdir(parents=True, exist_ok=True)
-    restore_error = db.restore_if_empty(db_path)
-    if restore_error:
-        # Scraping into a database that's empty only because restoring the real one failed would
-        # re-insert every lead fresh with blank status/notes/rejected_at -- the next backup then
-        # upserts those blanks straight over Supabase's real values. app.py's own /api/run already
-        # refuses to start a scrape in this state; this is the same guard for direct CLI use.
-        print(f"Refusing to scrape: couldn't restore the saved leads ({restore_error}). Fix the "
-              "backup connection and try again once it's confirmed working -- scraping now would "
-              "overwrite real data with blanks on the next backup.", file=sys.stderr)
-        return
-    db.import_audit_log_rejections(db_path)
-    seen = db.existing_phones(db_path)
+def run(states):
+    db.import_audit_log_rejections()
+    seen = db.existing_phones()
     today = date.today().isoformat()
     total_new = 0
 
@@ -445,7 +430,7 @@ def run(db_path, states):
             # a failure here (hit live) crashed the process after only 2 of 13 states with no
             # explanation, the same class of bug _attempt_state itself was built to prevent.
             try:
-                new, error = _attempt_state(state, db_path, seen, today)
+                new, error = _attempt_state(state, seen, today)
                 if error is None:
                     total_new += new
                     consecutive_persistent = 0
@@ -455,8 +440,8 @@ def run(db_path, states):
                     message = _friendly_error(error)
                     label = f"[{i + 1}/{len(remaining)}]" if round_num == 1 else "still failing after retry:"
                     print(f"{label} {state}: skipped -- {message}", file=sys.stderr)
-                    log_debug_detail(db_path, state, error)  # the real exception, for /api/debug.log
-                    still_failing.append(state)              # -- never shown in the user-facing log
+                    log_debug_detail(state, error)  # the real exception, for /api/debug.log
+                    still_failing.append(state)     # -- never shown in the user-facing log
                     consecutive_persistent = consecutive_persistent + 1 if message in PERSISTENT_ERROR_MESSAGES else 0
             except Exception as error:
                 # Same [i/n]-style prefix as the two branches above, so this line matches
@@ -465,7 +450,7 @@ def run(db_path, states):
                 # since app.py's parsing only recognized the other two branches' formats.
                 label = f"[{i + 1}/{len(remaining)}]" if round_num == 1 else "still failing after retry:"
                 print(f"{label} {state}: skipped -- the map data source had a temporary problem", file=sys.stderr)
-                log_debug_detail(db_path, state, error)
+                log_debug_detail(state, error)
                 still_failing.append(state)
                 consecutive_persistent = 0
             # A handful of states in a row failing in a way that won't clear by waiting (can't
@@ -499,18 +484,17 @@ def run(db_path, states):
         except Exception:
             pass
 
-    print(f"Done. {total_new} new rows -> {db_path} ({len(seen)} total unique phones)")
+    print(f"Done. {total_new} new rows -> Supabase ({len(seen)} total unique phones)")
     if remaining:
         print(f"Failed states (rerun to retry): {', '.join(remaining)}", file=sys.stderr)
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--output", type=Path, default=Path("output/leads.db"))
     parser.add_argument("--states", nargs="+", default=STATES, metavar="ST",
                         help="limit the run to these state codes, e.g. --states CO WA")
     args = parser.parse_args()
-    run(args.output, [state.upper() for state in args.states])
+    run([state.upper() for state in args.states])
 
 
 if __name__ == "__main__":

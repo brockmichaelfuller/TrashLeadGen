@@ -2,8 +2,10 @@
 
     python app.py            # then open http://127.0.0.1:8000
 
-Standard library only. Serves static/index.html and a small JSON API; scrapes by
-running the scraper as a subprocess so the CLI and the UI share one code path.
+Standard library only (aside from psycopg2, used indirectly via db.py). Serves static/index.html and
+a small JSON API; scrapes by running the scraper as a subprocess so the CLI and the UI share one code
+path. Supabase is this app's only storage -- see db.py -- so every request below that touches a lead
+is a live read or write against it, not a local cache.
 """
 import argparse
 import base64
@@ -17,7 +19,8 @@ import subprocess
 import sys
 import threading
 import time
-from datetime import date, datetime, timezone
+import traceback
+from datetime import date
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
@@ -26,8 +29,8 @@ ROOT = Path(__file__).parent
 sys.path.insert(0, str(ROOT))
 from lead_scraper import STATE_GROUPS, STATES, missing_fields  # noqa: E402
 import db  # noqa: E402
-DB_PATH = ROOT / "output" / "leads.db"
 INDEX_PATH = ROOT / "static" / "index.html"
+DEBUG_LOG_PATH = ROOT / "debug.log"
 MAX_LOG_LINES = 500
 SCRAPER_SCRIPT = "lead_scraper.py"
 # Split into state groups since a full nationwide run (one slow request per state) can outlast
@@ -38,70 +41,12 @@ GROUPS = [{"id": str(i + 1), "label": f"{g[0]}–{g[-1]} ({len(g)} states)", "st
 lock = threading.Lock()
 job = {"proc": None, "log": [], "started": False, "scope": "", "states": None, "stopped": False}
 
-# Backing up on every edit used to mean a synchronous GitHub commit + Sheets rewrite inside the
-# request -- typing a 50-character note (saved every 600ms) could fire off several of each. Backups
-# now run on a short delay after the *last* edit instead, so a burst of saves results in at most one
-# push; a failure gets one automatic retry, and the most recent failure (if any) is surfaced via
-# /api/status instead of only ever going to stderr.
-SYNC_DEBOUNCE_SECONDS = 5
-SYNC_RETRY_SECONDS = 30
-# lastSuccessAt: when a backup last actually landed -- there was previously no way to tell "backups
-# are fine, just quiet" from "the last one failed a while ago and the error already got missed",
-# short of an error banner that only ever shows up during a failure.
-backup_state = {"error": None, "lastSuccessAt": None}
-_sync_timer = None
 
-
-def _now_iso():
-    return datetime.now(timezone.utc).isoformat()
-
-# Set once at startup (and again on a manual retry) if the one-time restore of a fresh/empty
-# database failed -- see db.restore_if_empty's docstring for why a failed restore must never be
-# treated like a database that's just genuinely new. While this holds an error, the page must
-# refuse to start a scrape (see start_run) and must not show the ordinary "No leads yet" message,
-# since there's no way to tell that apart from "the real leads are one retry away".
-restore_state = {"error": None}
-
-
-def attempt_restore():
-    error = db.restore_if_empty(DB_PATH)
-    restore_state["error"] = error
-    if not error:
-        db.import_audit_log_rejections(DB_PATH)
-    return error
-
-
-def _run_sync():
-    global _sync_timer
-    error = db.sync_backup(DB_PATH)
-    with lock:
-        backup_state["error"] = error
-        if not error:
-            backup_state["lastSuccessAt"] = _now_iso()
-        _sync_timer = None
-    if error:
-        _schedule_sync(SYNC_RETRY_SECONDS)
-
-
-def _schedule_sync(delay):
-    global _sync_timer
-    with lock:
-        if _sync_timer is not None:
-            _sync_timer.cancel()
-        _sync_timer = threading.Timer(delay, _run_sync)
-        _sync_timer.daemon = True
-        _sync_timer.start()
-
-
-def schedule_sync():
-    _schedule_sync(SYNC_DEBOUNCE_SECONDS)
-
-
-def read_leads(db_path):
+def read_leads():
     """All non-rejected leads, each flagged complete (name, phone, email and timezone) or partial,
     with what's missing. Rejected rows (see delete_lead) are kept in the database but never surfaced
     here."""
-    rows = db.all_leads(db_path)
+    rows = db.all_leads()
     for row in rows:
         missing = missing_fields(row)
         row["complete"] = not missing
@@ -109,26 +54,26 @@ def read_leads(db_path):
     return rows
 
 
-def update_lead(db_path, phone, updates):
+def update_lead(phone, updates):
     """Set status/notes on the row with this phone number. Returns False if the phone isn't found."""
-    return db.update_fields(db_path, phone, updates)
+    return db.update_fields(phone, updates)
 
 
-def delete_lead(db_path, phone):
+def delete_lead(phone):
     """Mark the row with this phone number rejected -- for a lead that never should have matched
     (wrong business type), as opposed to a real hauler marked "Do not contact". The row is kept
     (just hidden from read_leads and everything built on it) rather than removed outright, so its
     phone permanently blocks the scraper from re-adding it on a later run. Returns False if the
     phone isn't found."""
-    return db.update_fields(db_path, phone, {"rejected_at": date.today().isoformat()})
+    return db.update_fields(phone, {"rejected_at": date.today().isoformat()})
 
 
-def undelete_lead(db_path, phone):
+def undelete_lead(phone):
     """Undo a delete within the same page load (see the "Undo" link in the UI right after removing
     a lead) by clearing rejected_at. Returns False if the phone isn't found or wasn't rejected."""
-    if not db.is_rejected(db_path, phone):
+    if not db.is_rejected(phone):
         return False
-    return db.update_fields(db_path, phone, {"rejected_at": ""})
+    return db.update_fields(phone, {"rejected_at": ""})
 
 
 # Leads marked with either of these are kept in the UI (for the record) but left out of every
@@ -151,7 +96,7 @@ def _required_str(data, key):
     return value or None
 
 
-def export_csv(db_path):
+def export_csv():
     """Every non-rejected lead ready to call (has a name and phone), except one marked "Not
     interested" or "Do not contact" -- the same set the page's Copy buttons use. There's no
     complete/partial split: a lead missing an email is still callable, so leaving it out of the
@@ -159,7 +104,7 @@ def export_csv(db_path):
     out = io.StringIO()
     writer = csv.DictWriter(out, fieldnames=db.COLUMNS, extrasaction="ignore", restval="")
     writer.writeheader()
-    for row in read_leads(db_path):
+    for row in read_leads():
         if row.get("status") not in DO_NOT_EXPORT_STATUSES:
             writer.writerow(row)
     return out.getvalue().encode()
@@ -173,19 +118,6 @@ def is_running():
 def pump_output(proc):
     for raw_line in proc.stdout:
         line = raw_line.rstrip()
-        # A backup failure/success during a scrape (see lead_scraper._attempt_state) is routed
-        # through the same backup_state an edit-triggered backup uses, instead of only ever showing
-        # up as a raw "sync_leads: GitHub push failed: HTTP 409: {...}"-style line buried in the
-        # plain-language run log with no banner to show for it.
-        if line.startswith("BACKUP_ERROR: "):
-            with lock:
-                backup_state["error"] = line[len("BACKUP_ERROR: "):]
-            continue
-        if line == "BACKUP_OK":
-            with lock:
-                backup_state["error"] = None
-                backup_state["lastSuccessAt"] = _now_iso()
-            continue
         with lock:
             job["log"].append(line)
             del job["log"][:-MAX_LOG_LINES]
@@ -258,12 +190,6 @@ def user_facing_log(log_lines):
 def start_run(group_id="all", explicit_states=None):
     """One scrape: the whole U.S., one ~13-state group, or (for the "retry failed" button) an
     explicit list of state codes."""
-    if restore_state["error"]:
-        # Scraping now would re-insert every lead fresh with blank status/notes/rejected_at, which
-        # the next backup push would then upsert straight over Supabase's real values -- see
-        # db.restore_if_empty's docstring. Retry the restore (the page offers a button for this)
-        # before a scrape is allowed to run at all.
-        return "Can't scrape yet -- the saved leads haven't been restored. Try the restore again first."
     if explicit_states:
         states = [s.upper() for s in explicit_states]
         # "retry: RI, CT, DE" (the raw scope value) used to show up verbatim in the page's headline
@@ -281,7 +207,7 @@ def start_run(group_id="all", explicit_states=None):
     with lock:
         if is_running():
             return "A run is already in progress."
-        cmd = [sys.executable, "-u", str(ROOT / SCRAPER_SCRIPT), "--output", str(DB_PATH)]
+        cmd = [sys.executable, "-u", str(ROOT / SCRAPER_SCRIPT)]
         if states:
             cmd += ["--states", *states]
         proc = subprocess.Popen(cmd, cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
@@ -408,11 +334,21 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         if not self.require_auth():
             return
+        try:
+            self._do_GET()
+        except Exception as error:  # Supabase is the only storage now -- a failure reaching it must
+            # be visible to whoever's looking at the page, not a dropped connection or a raw
+            # traceback. See db.py's module docstring for why this isn't swallowed further down.
+            print(f"GET {self.path} failed: {type(error).__name__}: {error}", file=sys.stderr)
+            traceback.print_exc()
+            self.send_json({"error": "Couldn't reach the database. Try again in a moment."}, 503)
+
+    def _do_GET(self):
         path = self.path.split("?")[0]
         if path == "/":
             self.send_body(INDEX_PATH.read_bytes(), "text/html; charset=utf-8")
         elif path == "/api/leads":
-            self.send_json(read_leads(DB_PATH))
+            self.send_json(read_leads())
         elif path == "/api/status":
             with lock:
                 running = is_running()
@@ -430,19 +366,14 @@ class Handler(BaseHTTPRequestHandler):
                             "notReachedStates": not_reached,
                             "abortedEarly": None if running else run_aborted_early(job["log"]),
                             "finishedCount": len(finished),
-                            "plannedCount": len(planned) if planned else None,
-                            "backupError": backup_state["error"],
-                            "backupLastSuccessAt": backup_state["lastSuccessAt"],
-                            "backupsPaused": db.backups_paused(DB_PATH),
-                            "restoreError": restore_state["error"]})
+                            "plannedCount": len(planned) if planned else None})
         elif path == "/api/groups":
             self.send_json({"groups": GROUPS})
         elif path == "/api/export.csv":
-            self.send_body(export_csv(DB_PATH), "text/csv",
+            self.send_body(export_csv(), "text/csv",
                            extra={"Content-Disposition": 'attachment; filename="leads.csv"'})
         elif path == "/api/debug.log":
-            debug_path = DB_PATH.parent / "debug.log"
-            body = debug_path.read_bytes() if debug_path.exists() else b"(empty)"
+            body = DEBUG_LOG_PATH.read_bytes() if DEBUG_LOG_PATH.exists() else b"(empty)"
             self.send_body(body, "text/plain; charset=utf-8")
         else:
             self.send_body(b"Not found", "text/plain", 404)
@@ -452,6 +383,14 @@ class Handler(BaseHTTPRequestHandler):
             return
         if not self.require_trusted_origin():
             return
+        try:
+            self._do_POST()
+        except Exception as error:
+            print(f"POST {self.path} failed: {type(error).__name__}: {error}", file=sys.stderr)
+            traceback.print_exc()
+            self.send_json({"error": "Couldn't reach the database. Try again in a moment."}, 503)
+
+    def _do_POST(self):
         path = self.path.split("?")[0]
         data = self.read_json()
         if path == "/api/run":
@@ -469,13 +408,6 @@ class Handler(BaseHTTPRequestHandler):
                     job["proc"].terminate()
                     job["stopped"] = True
             return self.send_json({"ok": True})
-        if path == "/api/backups":
-            db.set_backups_paused(DB_PATH, bool(data.get("paused")))
-            return self.send_json({"ok": True})
-        if path == "/api/restore/retry":
-            with lock:
-                error = attempt_restore()
-            return self.send_json({"error": error}, 400) if error else self.send_json({"ok": True})
         if path == "/api/lead":
             phone = _required_str(data, "phone")
             if not phone:
@@ -495,28 +427,19 @@ class Handler(BaseHTTPRequestHandler):
             if "status" in updates and updates["status"] not in VALID_STATUSES:
                 options = ", ".join(s or "(none)" for s in sorted(VALID_STATUSES))
                 return self.send_json({"error": f"status must be one of: {options}"}, 400)
-            with lock:
-                ok = update_lead(DB_PATH, phone, updates)
-            if ok:
-                schedule_sync()
+            ok = update_lead(phone, updates)
             return self.send_json({"ok": True}) if ok else self.send_json({"error": "Lead not found"}, 404)
         if path == "/api/lead/delete":
             phone = _required_str(data, "phone")
             if not phone:
                 return self.send_json({"error": "phone is required"}, 400)
-            with lock:
-                ok = delete_lead(DB_PATH, phone)
-            if ok:
-                schedule_sync()
+            ok = delete_lead(phone)
             return self.send_json({"ok": True}) if ok else self.send_json({"error": "Lead not found"}, 404)
         if path == "/api/lead/undelete":
             phone = _required_str(data, "phone")
             if not phone:
                 return self.send_json({"error": "phone is required"}, 400)
-            with lock:
-                ok = undelete_lead(DB_PATH, phone)
-            if ok:
-                schedule_sync()
+            ok = undelete_lead(phone)
             return self.send_json({"ok": True}) if ok else self.send_json({"error": "Lead not found"}, 404)
         self.send_json({"error": "Not found"}, 404)
 
@@ -530,7 +453,8 @@ def main():
     host = os.environ.get("HOST", "127.0.0.1")
     if host != "127.0.0.1" and not os.environ.get("APP_PASSWORD"):
         sys.exit("Refusing to listen on the network without APP_PASSWORD set.")
-    attempt_restore()  # recover the last backup, since a fresh host starts with no database
+    if not os.environ.get("SUPABASE_DB_URL"):
+        sys.exit("Refusing to start without SUPABASE_DB_URL set -- Supabase is this app's only storage now.")
     server = ThreadingHTTPServer((host, args.port), Handler)
     print(f"TrashLeadGen UI: http://{host}:{args.port}  (Ctrl+C to stop)", flush=True)
     try:

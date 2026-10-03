@@ -1,6 +1,6 @@
 # TrashLeadGen
 
-Finds residential curbside trash-hauling companies across the U.S. and saves their **name and phone number** to a local SQLite database, with a small web page (`app.py`) to run scrapes and record outreach outcomes. This is a research list for outreach prep. Nobody should be called or texted from it before Thomas reviews it (TCPA and do-not-call rules apply once numbers are dialed).
+Finds residential curbside trash-hauling companies across the U.S. and saves their **name and phone number** to Supabase (Postgres), with a small web page (`app.py`) to run scrapes and record outreach outcomes. This is a research list for outreach prep. Nobody should be called or texted from it before Thomas reviews it (TCPA and do-not-call rules apply once numbers are dialed).
 
 ## Data source
 
@@ -14,6 +14,7 @@ Coverage is limited by what mappers have added: many businesses have no phone nu
 python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
+export SUPABASE_DB_URL="postgresql://...// see Storage below"
 python app.py            # then open http://127.0.0.1:8000
 ```
 
@@ -21,18 +22,18 @@ This is what Render deploys (`python app.py`, per `render.yaml`/the service's st
 
 | Variable | Default | Meaning |
 |---|---|---|
+| `SUPABASE_DB_URL` | **required** | Postgres connection string -- this app has no other storage. The app refuses to start without it. See "Storage" below |
 | `PORT` | `8000` | Port to listen on |
 | `HOST` | `127.0.0.1` (localhost only) | Set to `0.0.0.0` to accept connections from outside the machine (needs `APP_PASSWORD` — the app refuses to start on a public host without one) |
 | `APP_PASSWORD` | none (open access) | HTTP Basic Auth password. Required once `HOST` isn't localhost |
 | `APP_USERNAME` | any username accepted | Optional comma-separated allowlist of usernames, checked alongside `APP_PASSWORD` |
-| `GITHUB_TOKEN`, `GITHUB_REPO`, `SUPABASE_DB_URL` | unset (disabled) | See "Making data permanent on Render" below |
 
 A few things worth knowing about the page itself:
 
 - **Scope.** "Entire U.S." runs all 50 states + DC in one subprocess; the four "Group" options split that into smaller chunks (useful on a host that can't finish the whole country in one sitting, like Render's free plan).
 - **Stop and Retry.** Stop ends the run cleanly (reported as "Stopped," not an error) and offers to continue with whatever states weren't reached. If some states fail outright (or the map data source is unreachable and the run gives up on it early — see below), a Retry button appears for just those.
 - **One list.** Every lead with a name and phone (everything actually needed to call) is on the page. Email, when OpenStreetMap has it, is a column and an optional "Has email" filter -- not a separate tab -- so Copy phones/emails and Download CSV always cover everyone, not just whichever view happens to be open.
-- **A backup warning banner** appears if the last save to GitHub/Supabase failed (see below) — it keeps retrying in the background on its own; the banner is just so a stuck backup isn't silent. Next to the pause/resume button, the page also always shows how long ago the last backup actually succeeded, so "no news" (nothing failing) can be told apart from "nothing has succeeded in a worryingly long time."
+- **A connection warning banner** appears if the page can't currently reach Supabase — it keeps retrying automatically (every poll, a few seconds apart); the banner is just so a stuck connection isn't silent, and the leads table stays showing whatever was last loaded rather than looking like it's been wiped.
 - **`/api/debug.log`** has the raw exception + traceback behind whatever plain-language message the page shows for a failed state — useful for diagnosing a *recurring* failure; not meant for the owner.
 
 ## Running the scraper directly (no web page)
@@ -41,18 +42,43 @@ A few things worth knowing about the page itself:
 python lead_scraper.py
 ```
 
-Same scraper `app.py` runs as a subprocess, invoked directly instead. Useful for local debugging or a one-off run without starting the server.
+Same scraper `app.py` runs as a subprocess, invoked directly instead. Useful for local debugging or a one-off run without starting the server. Also needs `SUPABASE_DB_URL` set.
 
 Options:
 
 | Flag | Default | Meaning |
 |---|---|---|
-| `--output` | `output/leads.db` | Where the SQLite database is written |
 | `--states` | all 50 + DC | Limit the run, e.g. `--states CO WA` |
 
 ## Storage
 
-Leads live in a SQLite database (`db.py`), with `phone` as the primary key -- that's what actually guarantees no duplicate, not application code. Both the web app and the scraper subprocess read and write it directly (SQLite's WAL journal mode plus a busy-timeout give real concurrent access; nothing needs its own file lock). GitHub backup only ever speaks CSV, so `db.py` exports the database to a companion `output/leads.csv` right before every backup push, and imports that same file into a fresh database on restore. Supabase backup speaks rows directly instead (a plain per-lead upsert, not a CSV blob), reading/writing that same companion CSV as the bridge between it and the database -- either way, the backup logic itself (`sync_leads.py`) is what does the actual talking to GitHub/Supabase, never `db.py` directly.
+Supabase (Postgres) is this app's **only** storage -- there is no local database and nothing to restore on startup. Every read and write (`db.py`) goes straight to it: the page's `/api/leads`, a status/notes save, Remove/Undo, and the scraper's own per-state writes are all live queries against the same table, from whichever process happens to be running. `phone` is the primary key, which is what actually guarantees no duplicate, not application code -- Postgres's own transactional guarantees are what make this safe to call from multiple threads or the scraper subprocess at once, with no extra locking code on this side.
+
+Set `SUPABASE_DB_URL` to a Postgres connection string (from the Supabase dashboard: **Project Settings → Database → Connection string**, the **Transaction pooler** one specifically — it's on port 6543 and IPv4-compatible, which Render needs; the direct connection is IPv6-only on most regions). The table has to exist first — run this once in Supabase's **SQL Editor**:
+
+```sql
+create table leads (
+  phone text primary key,
+  company_name text not null default '',
+  email text not null default '',
+  website text not null default '',
+  address text not null default '',
+  city text not null default '',
+  state text not null default '',
+  timezone text not null default '',
+  source text not null default '',
+  date_collected text not null default '',
+  status text not null default '',
+  notes text not null default '',
+  rejected_at text not null default '',
+  updated_at text not null default '',
+  created_at text not null default ''
+);
+```
+
+`created_at` (stamped once, at insert) drives the page's default newest-first ordering; `updated_at` (re-stamped on every edit) is just a general "when did this last change" fact. Neither is shown on the page itself, but both are included in Download CSV.
+
+A free Supabase project pauses itself after about a week with no activity (a scrape or an edit counts, so an actively-used app won't trigger this) — a paused project is resumed from the Supabase dashboard with one click. While paused, the app can't reach it at all; see the connection warning banner above.
 
 ## Output columns
 
@@ -66,61 +92,24 @@ Leads live in a SQLite database (`db.py`), with `phone` as the primary key -- th
 - **Website check.** A candidate that clears the name filters and has a website gets that site's own text checked (free, no AI/API cost) for language distinguishing a normal residential route ("weekly curbside," "residential pickup") from a dumpster-rental, junk-removal, or portable-toilet business ("dumpster rental," "junk removal," "porta potty rental") — this is what catches a company like "Horizon Disposal Services," whose name gives no hint it's actually a dumpster-rental business. A site that mentions both (common — plenty of real haulers also rent dumpsters) is kept; an unreachable site or one with neither signal is kept unverified rather than dropped, so a network hiccup never costs a real lead. It's still a heuristic, not a guarantee — review the list before outreach, and extend `DISQUALIFYING_SERVICE_PHRASES`/`QUALIFYING_SERVICE_PHRASES` (or `KNOWN_BRANDS`/`EXCLUDE_NAME`) as gaps turn up. This check adds real time to a scrape (a few new-candidate websites are fetched concurrently at a time, ~10s timeout each, rather than one at a time).
 - **`status` and `notes`** start blank and aren't set by the scraper. Once Thomas has reviewed the list and outreach begins, use the "Interested?" dropdown and Notes field on each row (right next to the phone number) to record the outcome of a call — they save as you type, each field saves independently so two people editing the same lead at once can't clobber each other's work, and both columns are included in the CSV export.
 - **"Not interested" and "Do not contact"** leads stay visible in the table (for the record) but are automatically left out of Copy phones, Copy emails, and Download CSV.
-- **Deleting a lead is permanent.** The Remove button on each row (confirms first, and offers Undo for a few seconds after) doesn't just drop the row — it's kept with a `rejected_at` date so its phone stays in the database forever, which is what stops a later scrape from seeing it as new and adding it right back. A rejected row is hidden everywhere else (the site, exports, the GitHub/Supabase backup), it just isn't gone from the database.
+- **Deleting a lead is permanent.** The Remove button on each row (confirms first, and offers Undo for a few seconds after) doesn't just drop the row — it's kept with a `rejected_at` date so its phone stays in the database forever, which is what stops a later scrape from seeing it as new and adding it right back. A rejected row is hidden everywhere else (the site, exports), it just isn't gone from the database.
 
-## Making data permanent on Render
+## Render has no persistent disk -- why that's no longer a problem
 
-Render's free plan has no persistent disk: every redeploy, and every time the service spins back up after ~15 minutes idle, starts from an empty filesystem and loses whatever was scraped. `sync_leads.py` backs up a CSV export of the database externally so that doesn't lose data — it's a no-op with nothing configured, and each backend below is independently optional:
-
-- **GitHub** — commits `output/leads.csv` to this repo after every state and every edit, and restores the latest commit (into a fresh database) when the app starts with none. Set `GITHUB_TOKEN` (a personal access token with Contents read/write on this repo) and `GITHUB_REPO` (`owner/name`). **If `GITHUB_REPO` is ever set to the same repo Render deploys from**, every backup commit will also trigger a new deploy (auto-deploy watches every push to the branch) — mid-scrape, that restarts the service and kills the run. Point it at a separate repo (or a branch Render doesn't deploy) instead, or turn off auto-deploy for that branch.
-- **Supabase** — a free-tier Postgres database. Every lead is upserted as its own row, keyed on `phone`, after every state and every edit — no clear-then-rewrite of anything, so a failed push can't lose what's already there. Set `SUPABASE_DB_URL` to a Postgres connection string (from the Supabase dashboard: **Project Settings → Database → Connection string**, the **Transaction pooler** one specifically — it's on port 6543 and IPv4-compatible, which Render needs; the direct connection is IPv6-only on most regions). The table has to exist first — run this once in Supabase's **SQL Editor**:
-
-  ```sql
-  create table leads (
-    phone text primary key,
-    company_name text not null default '',
-    email text not null default '',
-    website text not null default '',
-    address text not null default '',
-    city text not null default '',
-    state text not null default '',
-    timezone text not null default '',
-    source text not null default '',
-    date_collected text not null default '',
-    status text not null default '',
-    notes text not null default '',
-    rejected_at text not null default '',
-    updated_at text not null default ''
-  );
-  ```
-
-  A free Supabase project pauses itself after about a week with no activity (a scrape or an edit counts, so an actively-used app won't trigger this) — a paused project is resumed from the Supabase dashboard with one click, and nothing is lost while paused, it just won't back up until you resume it.
-
-  **`updated_at`** guards against a scrape's backup and an edit's backup landing out of order (editing a lead while a scrape is running is an ordinary, expected use of the page) — a push only overwrites a row in Supabase if its own `updated_at` is at least as new as what's already there, so a slow or retried push with older data can't roll back a newer edit that already landed. It's optional: `push_supabase` checks whether the column exists and falls back to the old unconditional upsert if it doesn't, so nothing breaks on a table created before this was added. If your table predates this column, add it once with:
-
-  ```sql
-  alter table leads add column updated_at text not null default '';
-  ```
-
-Both GitHub and Supabase can be set at once — on startup the app tries GitHub first and falls back to Supabase if GitHub has nothing (so either one alone is enough to survive a restart, into a brand new database). Neither is required for local use.
-
-A save from the web page (a status/notes edit or a delete/undo) writes to disk immediately and returns right away; the backup push happens a few seconds later in the background, so a burst of edits results in one push, not one per keystroke-save. If a push fails, it keeps retrying automatically every 30 seconds until one succeeds (or a new edit reschedules it sooner), and the page shows a banner for as long as the most recent attempt is still failing. A scrape backs up after every state regardless of whether the previous state's push succeeded, so a failure there self-corrects on the very next state.
+Render's free plan wipes the filesystem on every redeploy and every time the service spins back up after ~15 minutes idle. That used to mean the app needed its own backup/restore system around a local database; now there's simply no local database to lose; a cold start just starts making live Postgres queries again, same as before it went idle. Nothing to configure beyond `SUPABASE_DB_URL` itself.
 
 ## Stopping things
 
 | What | How | How fast |
 |---|---|---|
 | A running scrape | Click **Stop** on the page, or `POST /api/stop` | Immediate — the scraper subprocess is killed outright |
-| External backups (GitHub/Supabase) | Click **Pause external backups** in the page header, or `POST /api/backups {"paused": true}` | Immediate, and doesn't restart the service (an environment variable change would). Local saves keep working; nothing pushes until you **Resume external backups** (or `{"paused": false}`) |
-| The whole app | Stop the process (Ctrl+C locally; suspend/delete the service on Render) | Immediate, but Render's free plan has no persistent disk — see below before relying on this |
+| The whole app | Stop the process (Ctrl+C locally; suspend/delete the service on Render) | Immediate. Nothing is lost -- the data lives in Supabase, not on this process |
 
 Anyone who can reach the page (i.e. anyone with the `APP_PASSWORD`, once one is set) can do any of these; there's no separate owner role.
 
-The pause itself survives a restart when `SUPABASE_DB_URL` is set -- it's a settings row in Supabase (`app_settings`, created automatically the first time it's needed), not a file on Render's disk. Without Supabase configured, it falls back to a local flag file, which does **not** survive a restart on Render's free plan (it'll quietly resume on the next cold start) -- the same limitation local-only use has for everything else.
-
 ## Recurring lead-quality audits
 
-`audit_log.json` tracks which leads have already been reviewed (by a person or by an AI session) for actually being a residential curbside hauler, so a recurring audit only looks at leads it hasn't seen before instead of starting over each time. It's read and written by whatever process runs that audit (a Claude Code session, following its own setup instructions). The app itself also reads it, but only the `"deleted"` verdicts, and only to keep them rejected in the database (see `db.import_audit_log_rejections`, run at startup by both `app.py` and `lead_scraper.py`) — a lead the audit removed with older code, before permanent rejection existed, would otherwise come back as new on a later scrape. Commit `audit_log.json` whenever an audit runs, regardless of which session ran it, so the history carries over.
+`audit_log.json` tracks which leads have already been reviewed (by a person or by an AI session) for actually being a residential curbside hauler, so a recurring audit only looks at leads it hasn't seen before instead of starting over each time. It's read and written by whatever process runs that audit (a Claude Code session, following its own setup instructions). The app itself also reads it, but only the `"deleted"` verdicts, and only to keep them rejected in the database (see `db.import_audit_log_rejections`, run at the start of every scrape by `lead_scraper.py`'s `run()`) — a lead the audit removed with older code, before permanent rejection existed, would otherwise come back as new on a later scrape. Commit `audit_log.json` whenever an audit runs, regardless of which session ran it, so the history carries over.
 
 ## Tests
 
@@ -128,7 +117,9 @@ The pause itself survives a restart when `SUPABASE_DB_URL` is set -- it's a sett
 python -m unittest discover -s tests -t .
 ```
 
-Runs automatically (along with `pyflakes`) on every push and pull request via `.github/workflows/ci.yml`.
+Runs automatically (along with `pyflakes`) on every push and pull request via `.github/workflows/ci.yml`, against a disposable Postgres service container CI starts just for the run -- never the real Supabase project.
+
+Supabase is this app's only storage, so almost the whole suite needs a real Postgres to run against -- set `SUPABASE_DB_URL` to one (a local/disposable instance, not production) before running the command above. Anything that needs it and doesn't find one configured skips cleanly rather than failing (see `tests/helpers.py`); only the handful of tests with no database dependency at all (regex/parsing logic, mostly) run without it. The one-time schema setup is the same `create table` block from "Storage" above.
 
 Most of the suite is server-side (the Python modules above). `tests/test_browser.py` is different -- it drives the actual page in a real headless browser against a real running server, since headline wording, Stop/Retry/Continue, the email filter, row-level errors, and the inline Remove confirm are all client-side JS that no server-side test can reach at all. It needs [Playwright](https://playwright.dev/python/) and a browser binary, which the base `requirements.txt` deliberately doesn't pull in (the production app itself needs neither):
 
@@ -137,7 +128,7 @@ pip install -r requirements-dev.txt
 playwright install chromium
 ```
 
-It runs against `tests/fixtures/fake_scraper.py`, a stand-in for `lead_scraper.py` that speaks the same `--output`/`--states` CLI and understands a few special state codes (`SLOW<n>`, `FAIL`, `BLOCKED*` -- see that file) to trigger a slow/failed/blocked state on demand, so Run/Stop/Retry can be exercised through the real subprocess/log-parsing code path without ever hitting Overpass over the network. If `test_browser.py`'s tests are missing from a local run, Playwright isn't installed -- `unittest` skips the whole file rather than failing, but CI always has it.
+It runs against `tests/fixtures/fake_scraper.py`, a stand-in for `lead_scraper.py` that speaks the same `--states` CLI and understands a few special state codes (`SLOW<n>`, `FAIL`, `BLOCKED*` -- see that file) to trigger a slow/failed/blocked state on demand, so Run/Stop/Retry can be exercised through the real subprocess/log-parsing code path without ever hitting Overpass over the network. If `test_browser.py`'s tests are missing from a local run, Playwright isn't installed -- `unittest` skips the whole file rather than failing, but CI always has it.
 
 ## Notes
 

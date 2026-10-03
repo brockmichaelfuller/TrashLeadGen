@@ -1,24 +1,25 @@
 """End-to-end tests against a real running app.Handler server -- these are what actually exercise
 auth, HTTP status codes, and JSON error shapes the way a real client sees them, as opposed to
-calling app's route-handling functions directly."""
+calling app's route-handling functions directly. Needs a real Postgres (see tests/helpers.py),
+since every request here that touches a lead goes straight to it -- there's no local database to
+substitute in its place any more."""
 import csv
 import http.client
 import json
-import tempfile
 import threading
 import unittest
 from http.server import ThreadingHTTPServer
-from pathlib import Path
 from unittest.mock import patch
 
 import app
 import db
+from tests.helpers import clear_leads_table, requires_db
 
 
+@requires_db
 class ServerTestCase(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls._orig_db_path = app.DB_PATH
         cls.server = ThreadingHTTPServer(("127.0.0.1", 0), app.Handler)
         cls.port = cls.server.server_address[1]
         cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
@@ -29,25 +30,16 @@ class ServerTestCase(unittest.TestCase):
         cls.server.shutdown()
         cls.thread.join(timeout=5)
         cls.server.server_close()
-        app.DB_PATH = cls._orig_db_path
 
     def setUp(self):
-        # A fresh temp dir (and DB file) per test, rather than reusing one path across the class --
-        # SQLite's WAL mode leaves -wal/-shm side files that a simple unlink-and-recreate of the main
-        # file wouldn't reliably clear between tests. The server picks up app.DB_PATH per-request, so
-        # this doesn't require restarting it.
-        self.tmpdir = tempfile.TemporaryDirectory()
-        self.addCleanup(self.tmpdir.cleanup)
-        self.db_path = Path(self.tmpdir.name) / "leads.db"
-        app.DB_PATH = self.db_path
-        db.insert_if_new(self.db_path, {"company_name": "Acme Waste", "phone": "111"})
-        db.insert_if_new(self.db_path, {"company_name": "Declined Co", "phone": "222",
-                                         "status": "Do not contact", "notes": "already said no"})
+        clear_leads_table()
+        db.insert_if_new({"company_name": "Acme Waste", "phone": "111"})
+        db.insert_if_new({"company_name": "Declined Co", "phone": "222",
+                           "status": "Do not contact", "notes": "already said no"})
         with app.lock:
             app.job.update(proc=None, log=[], started=False, scope="", states=None, stopped=False)
         with app._auth_lock:
             app._auth_failures.clear()
-        app.restore_state["error"] = None
 
     def request(self, method, path, body=None, headers=None):
         conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
@@ -213,32 +205,6 @@ class RunEndpointTests(ServerTestCase):
         self.assertEqual(status, 400)
         self.assertFalse(app.is_running())
 
-    def test_a_scrape_is_refused_while_a_restore_is_known_to_have_failed(self):
-        # Hit live: scraping into a database that's empty only because its restore failed re-inserts
-        # every lead fresh with blank status/notes/rejected_at, which the next backup then upserts
-        # straight over Supabase's real values. This must be refused outright, not just discouraged.
-        app.restore_state["error"] = "Supabase pull failed: timeout"
-        status, body = self.post_json("/api/run", {"states": ["CO"]})
-        self.assertEqual(status, 400)
-        self.assertIn("error", body)
-        self.assertFalse(app.is_running())
-
-
-class RestoreRetryEndpointTests(ServerTestCase):
-    def test_retry_clears_the_error_on_success(self):
-        app.restore_state["error"] = "Supabase pull failed: timeout"
-        with patch.object(db, "restore_if_empty", return_value=None):
-            status, body = self.post_json("/api/restore/retry", {})
-        self.assertEqual(status, 200)
-        self.assertTrue(body["ok"])
-        self.assertIsNone(app.restore_state["error"])
-
-    def test_retry_reports_a_continued_failure(self):
-        with patch.object(db, "restore_if_empty", return_value="Supabase pull failed: timeout"):
-            status, body = self.post_json("/api/restore/retry", {})
-        self.assertEqual(status, 400)
-        self.assertEqual(app.restore_state["error"], "Supabase pull failed: timeout")
-
 
 class StatusEndpointTests(ServerTestCase):
     def test_shape_when_idle(self):
@@ -248,25 +214,6 @@ class StatusEndpointTests(ServerTestCase):
         self.assertEqual(body["started"], False)
         self.assertEqual(body["failedStates"], [])
         self.assertEqual(body["notReachedStates"], [])
-        self.assertEqual(body["backupsPaused"], False)
-        self.assertIsNone(body["restoreError"])
-        self.assertIn("backupLastSuccessAt", body)
-
-
-class BackupsPauseEndpointTests(ServerTestCase):
-    def tearDown(self):
-        db.set_backups_paused(self.db_path, False)
-
-    def test_pausing_and_resuming_is_reflected_in_status(self):
-        status, _ = self.post_json("/api/backups", {"paused": True})
-        self.assertEqual(status, 200)
-        _, body = self.get_json("/api/status")
-        self.assertTrue(body["backupsPaused"])
-
-        status, _ = self.post_json("/api/backups", {"paused": False})
-        self.assertEqual(status, 200)
-        _, body = self.get_json("/api/status")
-        self.assertFalse(body["backupsPaused"])
 
 
 class SecurityHeaderTests(ServerTestCase):
@@ -319,6 +266,23 @@ class AuthRateLimitTests(ServerTestCase):
         for _ in range(app.RATE_LIMIT_MAX_FAILURES + 2):
             status, _ = self.request("GET", "/api/leads", headers={"Authorization": f"Basic {creds}"})
             self.assertEqual(status, 200)
+
+
+class DatabaseErrorHandlingTests(ServerTestCase):
+    """Supabase is this app's only storage -- a request that can't reach it has to fail cleanly
+    (a JSON 503), not crash the request or leak a raw traceback to whoever's looking at the page."""
+
+    def test_a_db_error_on_a_get_returns_a_clean_503_not_a_crash(self):
+        with patch("app.db.all_leads", side_effect=Exception("connection refused")):
+            status, body = self.get_json("/api/leads")
+        self.assertEqual(status, 503)
+        self.assertIn("error", body)
+
+    def test_a_db_error_on_a_post_returns_a_clean_503_not_a_crash(self):
+        with patch("app.db.update_fields", side_effect=Exception("connection refused")):
+            status, body = self.post_json("/api/lead", {"phone": "111", "status": "Interested"})
+        self.assertEqual(status, 503)
+        self.assertIn("error", body)
 
 
 if __name__ == "__main__":

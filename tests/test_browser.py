@@ -5,9 +5,12 @@ the suite can't touch at all, since none of it runs in Python. Uses tests/fixtur
 in place of the real lead_scraper.py, so Run/Stop/Retry exercise the real subprocess/log-parsing
 code path end to end without ever hitting Overpass over the network -- see that file for the
 special state codes (SLOW<n>, FAIL, BLOCKED) these tests use to control its behavior deterministically.
+
+Needs a real Postgres (see tests/helpers.py) -- Supabase is this app's only storage, so both the
+server under test and the fake_scraper.py subprocess it spawns talk to it directly for every lead
+read/write.
 """
 import json
-import tempfile
 import threading
 import unittest
 from http.server import ThreadingHTTPServer
@@ -20,15 +23,16 @@ except ImportError:
 
 import app
 import db
+from tests.helpers import clear_leads_table, requires_db
 
 FIXTURE_SCRAPER = "tests/fixtures/fake_scraper.py"
 
 
+@requires_db
 @unittest.skipUnless(sync_playwright, "playwright not installed -- see requirements-dev.txt")
 class BrowserTestCase(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls._orig_db_path = app.DB_PATH
         cls._orig_scraper_script = app.SCRAPER_SCRIPT
         app.SCRAPER_SCRIPT = FIXTURE_SCRAPER
         cls.server = ThreadingHTTPServer(("127.0.0.1", 0), app.Handler)
@@ -45,17 +49,12 @@ class BrowserTestCase(unittest.TestCase):
         cls.server.shutdown()
         cls.thread.join(timeout=5)
         cls.server.server_close()
-        app.DB_PATH = cls._orig_db_path
         app.SCRAPER_SCRIPT = cls._orig_scraper_script
 
     def setUp(self):
-        self.tmpdir = tempfile.TemporaryDirectory()
-        self.addCleanup(self.tmpdir.cleanup)
-        self.db_path = Path(self.tmpdir.name) / "leads.db"
-        app.DB_PATH = self.db_path
+        clear_leads_table()
         with app.lock:
             app.job.update(proc=None, log=[], started=False, scope="", states=None, stopped=False)
-        app.backup_state["error"] = None
         self.page = self.browser.new_page()
         self.addCleanup(self.page.close)
 
@@ -82,8 +81,8 @@ class LeadsTableTests(BrowserTestCase):
         expect(self.page.locator("#empty")).to_have_text("No leads yet. Click Run scrape to collect them.")
 
     def test_renders_leads_with_and_without_email_together(self):
-        db.insert_if_new(self.db_path, {"phone": "111", "company_name": "Has Email Co", "email": "a@b.com", "state": "CO"})
-        db.insert_if_new(self.db_path, {"phone": "222", "company_name": "No Email Co", "state": "TX"})
+        db.insert_if_new({"phone": "111", "company_name": "Has Email Co", "email": "a@b.com", "state": "CO"})
+        db.insert_if_new({"phone": "222", "company_name": "No Email Co", "state": "TX"})
         self.goto()
         expect(self.page.locator("#rows tr")).to_have_count(2)
         expect(self.page.locator("#statTotal")).to_have_text("2")
@@ -94,17 +93,17 @@ class LeadsTableTests(BrowserTestCase):
         expect(self.page.locator("#rows")).to_contain_text("Has Email Co")
 
     def test_rejected_leads_are_not_shown(self):
-        db.insert_if_new(self.db_path, {"phone": "111", "company_name": "Kept Co"})
-        db.insert_if_new(self.db_path, {"phone": "222", "company_name": "Rejected Co"})
-        db.update_fields(self.db_path, "222", {"rejected_at": "2026-09-28"})
+        db.insert_if_new({"phone": "111", "company_name": "Kept Co"})
+        db.insert_if_new({"phone": "222", "company_name": "Rejected Co"})
+        db.update_fields("222", {"rejected_at": "2026-09-28"})
         self.goto()
         expect(self.page.locator("#rows tr")).to_have_count(1)
         expect(self.page.locator("#rows")).to_contain_text("Kept Co")
 
     def test_copy_phones_copies_every_non_excluded_lead_including_one_missing_email(self):
-        db.insert_if_new(self.db_path, {"phone": "(555) 111-1111", "company_name": "A", "email": "a@b.com"})
-        db.insert_if_new(self.db_path, {"phone": "(555) 222-2222", "company_name": "B"})  # no email
-        db.insert_if_new(self.db_path, {"phone": "(555) 333-3333", "company_name": "C", "status": "Do not contact"})
+        db.insert_if_new({"phone": "(555) 111-1111", "company_name": "A", "email": "a@b.com"})
+        db.insert_if_new({"phone": "(555) 222-2222", "company_name": "B"})  # no email
+        db.insert_if_new({"phone": "(555) 333-3333", "company_name": "C", "status": "Do not contact"})
         self.page.context.grant_permissions(["clipboard-read", "clipboard-write"])
         self.goto()
         expect(self.page.locator("#rows tr")).to_have_count(3)
@@ -113,8 +112,8 @@ class LeadsTableTests(BrowserTestCase):
         self.assertEqual(set(clipboard.split("\n")), {"(555) 111-1111", "(555) 222-2222"})
 
     def test_download_csv_includes_every_non_excluded_lead(self):
-        db.insert_if_new(self.db_path, {"phone": "111", "company_name": "A", "email": "a@b.com"})
-        db.insert_if_new(self.db_path, {"phone": "222", "company_name": "B"})
+        db.insert_if_new({"phone": "111", "company_name": "A", "email": "a@b.com"})
+        db.insert_if_new({"phone": "222", "company_name": "B"})
         self.goto()
         with self.page.expect_download() as dl_info:
             self.page.locator("#download").click()
@@ -125,7 +124,7 @@ class LeadsTableTests(BrowserTestCase):
     def test_a_search_matching_nothing_shows_a_message_instead_of_a_blank_table(self):
         # Hit live: filtering to zero rows left a blank table with no explanation -- "No leads yet"
         # (which invites running a scrape) only ever covered the case of genuinely having none at all.
-        db.insert_if_new(self.db_path, {"phone": "111", "company_name": "Real Hauler"})
+        db.insert_if_new({"phone": "111", "company_name": "Real Hauler"})
         self.goto()
         self.page.locator("#search").fill("no such company")
         expect(self.page.locator("#rows tr")).to_have_count(0)
@@ -139,17 +138,17 @@ class StatusAndNotesTests(BrowserTestCase):
         # re-dim the row for its new status), which replaced the "Saved" tag element with a fresh one
         # before it ever got to show -- it now just toggles the row's dimmed class directly, so the
         # tag survives and both are checkable here.
-        db.insert_if_new(self.db_path, {"phone": "111", "company_name": "A"})
+        db.insert_if_new({"phone": "111", "company_name": "A"})
         self.goto()
         self.page.locator("td.interested select").select_option("Not interested")
         expect(self.page.locator("#rows tr")).to_have_class("excluded", timeout=5000)  # dimmed in place
         expect(self.page.locator(".saved-tag").first).to_have_class("saved-tag show")
-        self.assertEqual(db.all_leads(self.db_path)[0]["status"], "Not interested")
+        self.assertEqual(db.all_leads()[0]["status"], "Not interested")
         self.page.reload()
         expect(self.page.locator("td.interested select")).to_have_value("Not interested")
 
     def test_typing_notes_and_blurring_saves_and_shows_the_saved_tag(self):
-        db.insert_if_new(self.db_path, {"phone": "111", "company_name": "A"})
+        db.insert_if_new({"phone": "111", "company_name": "A"})
         self.goto()
         notes = self.page.locator(".notes-input")
         notes.fill("Left a voicemail")
@@ -158,12 +157,12 @@ class StatusAndNotesTests(BrowserTestCase):
         # never replaced out from under the assertion -- the "show" state is safe to check directly.
         # nth(1): the row's second .saved-tag in DOM order (tr.append(statusCell(l), notesCell(l))).
         expect(self.page.locator(".saved-tag").nth(1)).to_have_class("saved-tag show")
-        self.assertEqual(db.all_leads(self.db_path)[0]["notes"], "Left a voicemail")
+        self.assertEqual(db.all_leads()[0]["notes"], "Left a voicemail")
         self.page.reload()
         expect(self.page.locator(".notes-input")).to_have_value("Left a voicemail")
 
     def test_a_failed_save_shows_inline_on_the_row_not_only_in_the_scrape_card(self):
-        db.insert_if_new(self.db_path, {"phone": "111", "company_name": "A"})
+        db.insert_if_new({"phone": "111", "company_name": "A"})
         self.goto()
         self.page.route("**/api/lead", lambda route: route.fulfill(
             status=400, content_type="application/json", body=json.dumps({"error": "simulated failure"})))
@@ -175,7 +174,7 @@ class StatusAndNotesTests(BrowserTestCase):
     def test_a_failed_status_save_reverts_the_dropdown_and_never_auto_hides(self):
         # Hit live: a 5s auto-fading error read exactly like success once it faded -- the dropdown
         # kept the unsaved value with nothing on screen to say it hadn't actually been recorded.
-        db.insert_if_new(self.db_path, {"phone": "111", "company_name": "A", "status": "Interested"})
+        db.insert_if_new({"phone": "111", "company_name": "A", "status": "Interested"})
         self.goto()
         self.page.route("**/api/lead", lambda route: route.fulfill(
             status=500, content_type="application/json", body=json.dumps({"error": "server exploded"})))
@@ -185,10 +184,10 @@ class StatusAndNotesTests(BrowserTestCase):
         expect(sel).to_have_value("Interested")  # reverted -- never shows an unsaved value as current
         self.page.wait_for_timeout(5500)  # well past the old 5s auto-fade
         expect(self.page.locator("#rows .row-err").first).to_be_visible()
-        self.assertEqual(db.all_leads(self.db_path)[0]["status"], "Interested")  # unchanged in the database
+        self.assertEqual(db.all_leads()[0]["status"], "Interested")  # unchanged in the database
 
     def test_retrying_a_failed_status_save_clears_the_error_once_it_succeeds(self):
-        db.insert_if_new(self.db_path, {"phone": "111", "company_name": "A"})
+        db.insert_if_new({"phone": "111", "company_name": "A"})
         self.goto()
         self.page.route("**/api/lead", lambda route: route.fulfill(
             status=500, content_type="application/json", body=json.dumps({"error": "server exploded"})))
@@ -199,12 +198,12 @@ class StatusAndNotesTests(BrowserTestCase):
         self.page.unroute("**/api/lead")
         self.page.locator("#rows .row-err .link", has_text="Retry").first.click()
         expect(self.page.locator("#rows .row-err").first).to_be_hidden(timeout=5000)
-        self.assertEqual(db.all_leads(self.db_path)[0]["status"], "Interested")
+        self.assertEqual(db.all_leads()[0]["status"], "Interested")
 
     def test_a_failed_notes_save_keeps_the_typed_text_instead_of_reverting_it(self):
         # Unlike status, notes is free-typed text the owner doesn't want to lose on a failure -- it
         # stays in the field, just marked unsaved, rather than snapping back to the old value.
-        db.insert_if_new(self.db_path, {"phone": "111", "company_name": "A"})
+        db.insert_if_new({"phone": "111", "company_name": "A"})
         self.goto()
         self.page.route("**/api/lead", lambda route: route.fulfill(
             status=500, content_type="application/json", body=json.dumps({"error": "server exploded"})))
@@ -220,7 +219,7 @@ class StatusAndNotesTests(BrowserTestCase):
 
 class RemoveUndoTests(BrowserTestCase):
     def test_remove_requires_a_second_click_to_confirm(self):
-        db.insert_if_new(self.db_path, {"phone": "111", "company_name": "Junk Co"})
+        db.insert_if_new({"phone": "111", "company_name": "Junk Co"})
         self.goto()
         btn = self.page.locator(".removeBtn")
         btn.click()
@@ -233,29 +232,29 @@ class RemoveUndoTests(BrowserTestCase):
         btn.click()
         expect(self.page.locator("#rows tr")).to_have_count(0)
         expect(self.page.locator("#undoBar")).to_be_visible()
-        self.assertTrue(db.is_rejected(self.db_path, "111"))
+        self.assertTrue(db.is_rejected("111"))
 
     def test_a_single_click_does_not_remove_and_reverts_on_its_own(self):
-        db.insert_if_new(self.db_path, {"phone": "111", "company_name": "Real Hauler"})
+        db.insert_if_new({"phone": "111", "company_name": "Real Hauler"})
         self.goto()
         self.page.locator(".removeBtn").click()
         expect(self.page.locator(".removeBtn")).to_have_text("Confirm remove?")
         # Reverts on its own after a few seconds without a second click (see removeCell's 4s timer).
         expect(self.page.locator(".removeBtn")).to_have_text("Remove", timeout=6000)
-        self.assertFalse(db.is_rejected(self.db_path, "111"))
+        self.assertFalse(db.is_rejected("111"))
 
     def test_a_double_click_does_not_remove(self):
         # Hit live: a native double-click fires two ordinary "click" events back to back, which used
         # to land as "arm the confirmation" immediately followed by "confirm it" -- removing the lead
         # without the user ever consciously seeing the "Confirm remove?" step in between.
-        db.insert_if_new(self.db_path, {"phone": "111", "company_name": "Junk Co"})
+        db.insert_if_new({"phone": "111", "company_name": "Junk Co"})
         self.goto()
         self.page.locator(".removeBtn").dblclick()
         expect(self.page.locator("#rows tr")).to_have_count(1)  # still there -- the double-click didn't confirm it
-        self.assertFalse(db.is_rejected(self.db_path, "111"))
+        self.assertFalse(db.is_rejected("111"))
 
     def test_undo_brings_the_lead_back(self):
-        db.insert_if_new(self.db_path, {"phone": "111", "company_name": "Oops Co"})
+        db.insert_if_new({"phone": "111", "company_name": "Oops Co"})
         self.goto()
         btn = self.page.locator(".removeBtn")
         btn.click()
@@ -264,7 +263,7 @@ class RemoveUndoTests(BrowserTestCase):
         expect(self.page.locator("#rows tr")).to_have_count(0)
         self.page.locator("#undoBtn").click()
         expect(self.page.locator("#rows tr")).to_have_count(1)
-        self.assertFalse(db.is_rejected(self.db_path, "111"))
+        self.assertFalse(db.is_rejected("111"))
 
 
 class RunStopRetryTests(BrowserTestCase):
@@ -290,7 +289,7 @@ class RunStopRetryTests(BrowserTestCase):
         expect(self.page.locator("#retryFailed")).to_be_visible(timeout=5000)
         self.page.locator("#retryFailed").click()
         expect(self.page.locator("#progressText")).to_contain_text("Finished scraping", timeout=10000)
-        self.assertEqual(len(db.all_leads(self.db_path)), 2)
+        self.assertEqual(len(db.all_leads()), 2)
 
     def test_a_failed_state_shows_a_matching_retry_button(self):
         self.goto()
@@ -309,28 +308,11 @@ class RunStopRetryTests(BrowserTestCase):
         expect(self.page.locator("#retryFailed")).to_have_text("Retry 4 states not yet reached (BLOCKED1, BLOCKED2, CO, WY)")
 
 
-class BackupPauseTests(BrowserTestCase):
-    def test_pausing_and_resuming_toggles_the_banner_and_button_text(self):
-        self.goto()
-        toggle = self.page.locator("#backupToggle")
-        expect(toggle).to_have_text("Pause external backups")
-        expect(self.page.locator("#backupPausedNote")).to_be_hidden()
-
-        toggle.click()
-        expect(self.page.locator("#backupPausedNote")).to_be_visible()
-        expect(toggle).to_have_text("Resume external backups")
-        self.assertTrue(db.backups_paused(self.db_path))
-
-        toggle.click()
-        expect(self.page.locator("#backupPausedNote")).to_be_hidden()
-        self.assertFalse(db.backups_paused(self.db_path))
-
-
 class ConnectivityTests(BrowserTestCase):
     def test_an_unreachable_server_shows_a_banner_and_clears_once_it_recovers(self):
         # Hit live: poll() failing (server down, network blip) was swallowed by its own .catch(() =>
         # {}) with nothing on the page saying why the table had gone stale.
-        db.insert_if_new(self.db_path, {"phone": "111", "company_name": "A"})
+        db.insert_if_new({"phone": "111", "company_name": "A"})
         self.goto()
         expect(self.page.locator("#connWarn")).to_be_hidden()
         self.page.route("**/api/status", lambda route: route.abort())
@@ -338,39 +320,17 @@ class ConnectivityTests(BrowserTestCase):
         self.page.unroute("**/api/status")
         expect(self.page.locator("#connWarn")).to_be_hidden(timeout=5000)
 
-
-class RestoreFailureTests(BrowserTestCase):
-    """A failed restore at start-up must never look like an ordinary empty, new install -- see
-    db.restore_if_empty's docstring for the real bug this guards against (a scrape re-inserting
-    every lead fresh with blank status/notes/rejected_at, which the next backup then pushes
-    straight over Supabase's real values)."""
-
-    def setUp(self):
-        super().setUp()
-        app.restore_state["error"] = "Supabase pull failed: timeout"
-        self.addCleanup(lambda: app.restore_state.update(error=None))
-
-    def test_shows_a_blocking_message_not_the_ordinary_empty_state(self):
+    def test_a_db_error_loading_leads_shows_a_banner_without_wiping_the_table(self):
+        # Supabase is the only storage now -- a transient failure reading it must never look like
+        # "there are no leads," since the real leads are still there, just unreachable a moment.
+        db.insert_if_new({"phone": "111", "company_name": "A"})
         self.goto()
-        expect(self.page.locator("#restoreWarn")).to_be_visible()
-        expect(self.page.locator("#restoreWarnText")).to_contain_text("Supabase pull failed: timeout")
-        expect(self.page.locator("#empty")).to_be_visible()
-        expect(self.page.locator("#empty")).to_contain_text("Couldn't load your saved leads")
-        expect(self.page.locator("#empty")).not_to_contain_text("No leads yet")
-
-    def test_run_scrape_is_disabled(self):
-        self.goto()
-        expect(self.page.locator("#run")).to_be_disabled()
-
-    def test_try_again_clears_the_banner_once_restore_succeeds(self):
-        # Pre-seeding a lead is enough on its own to make the real restore_if_empty() succeed (it
-        # only even attempts a restore when the database is actually empty), so Try again can be
-        # exercised against the real retry endpoint rather than a mocked one.
-        db.insert_if_new(self.db_path, {"phone": "111", "company_name": "Recovered Co"})
-        self.goto()
-        self.page.locator("#retryRestore").click()
-        expect(self.page.locator("#restoreWarn")).to_be_hidden(timeout=5000)
-        expect(self.page.locator("#run")).to_be_enabled()
+        expect(self.page.locator("#rows tr")).to_have_count(1)
+        self.page.route("**/api/leads", lambda route: route.fulfill(
+            status=503, content_type="application/json", body=json.dumps({"error": "db unreachable"})))
+        self.page.evaluate("loadLeads()")
+        expect(self.page.locator("#connWarn")).to_be_visible(timeout=5000)
+        expect(self.page.locator("#rows tr")).to_have_count(1)  # not wiped to empty
 
 
 if __name__ == "__main__":
